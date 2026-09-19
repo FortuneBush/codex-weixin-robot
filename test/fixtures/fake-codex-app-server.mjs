@@ -222,6 +222,29 @@ rl.on("line", (line) => {
         }
       });
       send({
+        method: "thread/tokenUsage/updated",
+        params: {
+          threadId: message.params.threadId,
+          turnId,
+          tokenUsage: {
+            last: {
+              cachedInputTokens: 2,
+              inputTokens: 12,
+              outputTokens: 7,
+              reasoningOutputTokens: 3,
+              totalTokens: 19
+            },
+            total: {
+              cachedInputTokens: 2,
+              inputTokens: 12,
+              outputTokens: 7,
+              reasoningOutputTokens: 3,
+              totalTokens: 19
+            }
+          }
+        }
+      });
+      send({
         method: "turn/completed",
         params: { threadId: message.params.threadId, turn: completedTurn(turnId, "completed") }
       });

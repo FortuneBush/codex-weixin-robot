@@ -108,6 +108,7 @@ export class AppServerCodexRunner {
   private readonly turnStreams = new Map<string, TurnStream>();
   private readonly queuedTurnEvents = new Map<string, QueuedTurnEvent[]>();
   private readonly itemPhasesByTurn = new Map<string, Map<string, string>>();
+  private readonly tokenUsageByTurn = new Map<string, CodexTokenUsage>();
   private readonly runtimeInfoByThread = new Map<string, CodexRuntimeInfo>();
   private modelOptions?: CodexModelOption[];
 
@@ -377,6 +378,17 @@ export class AppServerCodexRunner {
   }
 
   private handleNotification(method: string, params: Record<string, unknown>, raw: string): void {
+    if (method === "thread/tokenUsage/updated") {
+      const threadId = typeof params.threadId === "string" ? params.threadId : undefined;
+      const turnId = typeof params.turnId === "string" ? params.turnId : undefined;
+      const tokenUsage = params.tokenUsage as Record<string, unknown> | undefined;
+      const lastUsage = parseCodexTokenUsage(tokenUsage?.last);
+      if (threadId && turnId && lastUsage) {
+        this.tokenUsageByTurn.set(turnKey(threadId, turnId), lastUsage);
+      }
+      return;
+    }
+
     if (method === "item/started") {
       const key = turnKeyFromParams(params);
       const item = params.item as Record<string, unknown> | undefined;
@@ -448,7 +460,7 @@ export class AppServerCodexRunner {
       text: this.turnTexts.get(key) ?? extractAgentMessageFromTurn(turn),
       raw: (this.turnEvents.get(key) ?? []).join("\n"),
       error: typeof errorValue?.message === "string" ? errorValue.message : undefined,
-      usage: parseCodexTokenUsage(turn?.usage ?? params.usage)
+      usage: parseCodexTokenUsage(turn?.usage ?? params.usage) ?? this.tokenUsageByTurn.get(key)
     };
     this.activeTurns.delete(threadId);
     const waiter = this.turnWaiters.get(key);
@@ -499,6 +511,7 @@ export class AppServerCodexRunner {
     this.turnTexts.delete(key);
     this.queuedTurnEvents.delete(key);
     this.itemPhasesByTurn.delete(key);
+    this.tokenUsageByTurn.delete(key);
     if (completion.status === "completed") {
       resolve({
         text: completion.text,

@@ -31,6 +31,12 @@ test("uses the Codex V2 initialize, thread, and turn lifecycle", async (t) => {
   });
   assert.equal(first.threadId, "thread-new");
   assert.equal(first.text, "reply:first");
+  assert.deepEqual(first.usage, {
+    cachedInputTokens: 2,
+    inputTokens: 12,
+    outputTokens: 7,
+    totalTokens: 19
+  });
   assert.deepEqual(deltas, ["reply:", "first"]);
   assert.deepEqual(progress, ["working:first"]);
   assert.match(first.raw, /item\/completed/);
