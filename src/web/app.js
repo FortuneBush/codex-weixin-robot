@@ -54,6 +54,12 @@ document.addEventListener("DOMContentLoaded", () => {
     runningAccountMetric: document.querySelector("#runningAccountMetric"),
     sessionMetric: document.querySelector("#sessionMetric"),
     workspaceMetric: document.querySelector("#workspaceMetric"),
+    usageTotal: document.querySelector("#usageTotal"),
+    usageInput: document.querySelector("#usageInput"),
+    usageOutput: document.querySelector("#usageOutput"),
+    usageTurns: document.querySelector("#usageTurns"),
+    usageChart: document.querySelector("#usageChart"),
+    usageEmpty: document.querySelector("#usageEmpty"),
     qrDialog: document.querySelector("#qrDialog"),
     qrFrame: document.querySelector("#qrFrame"),
     qrStatus: document.querySelector("#qrStatus"),
@@ -81,6 +87,7 @@ function bindEvents() {
   document.querySelector("#addAccountButton").addEventListener("click", () => void beginLogin());
   document.querySelector("#refreshQrButton").addEventListener("click", () => void beginLogin());
   document.querySelector("#refreshAccountsButton").addEventListener("click", () => void refreshData(true));
+  document.querySelector("#refreshUsageButton").addEventListener("click", () => void refreshData(true));
   document.querySelector("#newSessionButton").addEventListener("click", openNewSessionDialog);
   document.querySelector("#settingsForm").addEventListener("submit", (event) => void saveSettings(event));
   document.querySelector("#modelInput").addEventListener("change", () => renderEffortOptions(""));
@@ -297,6 +304,7 @@ async function refreshData(notify) {
     renderMetrics();
     renderAccounts();
     renderSessions();
+    renderUsage();
     drawIcons();
     const currentSession = selectedSession();
     if (
@@ -322,6 +330,7 @@ function renderAll() {
   renderMetrics();
   renderAccounts();
   renderSessions();
+  renderUsage();
   renderSettings();
   drawIcons();
 }
@@ -1304,7 +1313,7 @@ async function saveSettings(event) {
 }
 
 function showView(name, updateHash = true) {
-  const valid = ["accounts", "sessions", "settings"].includes(name) ? name : "accounts";
+  const valid = ["accounts", "sessions", "usage", "settings"].includes(name) ? name : "accounts";
   document.querySelectorAll("[data-view-panel]").forEach((panel) => {
     const visible = panel.dataset.viewPanel === valid;
     panel.hidden = !visible;
@@ -1401,10 +1410,53 @@ function relativeTime(value) {
   return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit" }).format(new Date(value));
 }
 
+function renderUsage() {
+  const sessions = state.sessions
+    .filter((session) => session.tokenUsage && session.tokenUsage.totalTokens > 0)
+    .sort((a, b) => (b.tokenUsage.totalTokens || 0) - (a.tokenUsage.totalTokens || 0));
+  const totals = sessions.reduce((sum, session) => {
+    const usage = session.tokenUsage;
+    sum.inputTokens += usage.inputTokens || 0;
+    sum.outputTokens += usage.outputTokens || 0;
+    sum.totalTokens += usage.totalTokens || 0;
+    sum.turnCount += usage.turnCount || 0;
+    return sum;
+  }, { inputTokens: 0, outputTokens: 0, totalTokens: 0, turnCount: 0 });
+  els.usageTotal.textContent = formatTokenCount(totals.totalTokens);
+  els.usageInput.textContent = formatTokenCount(totals.inputTokens);
+  els.usageOutput.textContent = formatTokenCount(totals.outputTokens);
+  els.usageTurns.textContent = formatTokenCount(totals.turnCount);
+  els.usageEmpty.hidden = sessions.length > 0;
+  if (!sessions.length) {
+    els.usageChart.innerHTML = "";
+    return;
+  }
+  const maxTotal = Math.max(...sessions.map((session) => session.tokenUsage.totalTokens || 0), 1);
+  els.usageChart.innerHTML = sessions.map((session) => {
+    const usage = session.tokenUsage;
+    const total = usage.totalTokens || 0;
+    const inputWidth = Math.max(0, Math.min(100, (usage.inputTokens || 0) / maxTotal * 100));
+    const outputWidth = Math.max(0, Math.min(100, (usage.outputTokens || 0) / maxTotal * 100));
+    return `<div class="usage-row">
+      <div class="usage-row-label"><strong>${escapeHtml(session.title)}</strong><small>${escapeHtml(accountDisplayName(session.accountId))} · ${usage.turnCount || 0} 轮</small></div>
+      <div class="usage-bar" aria-label="${escapeAttr(session.title)}：${formatExactTokenCount(total)} Token">
+        <span class="usage-bar-input" style="width:${inputWidth.toFixed(2)}%"></span><span class="usage-bar-output" style="width:${outputWidth.toFixed(2)}%"></span>
+      </div>
+      <strong class="usage-row-total">${formatTokenCount(total)}</strong>
+    </div>`;
+  }).join("");
+}
+
 function formatTokenCount(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return "0";
   return new Intl.NumberFormat("zh-CN", { notation: "compact", maximumFractionDigits: 1 }).format(number);
+}
+
+function formatExactTokenCount(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "0";
+  return new Intl.NumberFormat("zh-CN").format(number);
 }
 
 function messageTime(value) {

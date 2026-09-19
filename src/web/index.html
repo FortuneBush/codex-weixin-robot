@@ -26,6 +26,7 @@
       <nav class="view-tabs" aria-label="管理视图">
         <button class="tab is-active" type="button" data-view="accounts">微信账号</button>
         <button class="tab" type="button" data-view="sessions">会话</button>
+        <button class="tab" type="button" data-view="usage">Token 统计</button>
         <button class="tab" type="button" data-view="settings">设置</button>
       </nav>
       <div class="header-actions">
@@ -137,6 +138,32 @@
           </form>
         </section>
       </div>
+    </section>
+
+    <section class="view usage-view" id="usageView" data-view-panel="usage" hidden>
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">TOKEN USAGE</p>
+          <h1>Token 统计</h1>
+        </div>
+        <button class="icon-button" id="refreshUsageButton" type="button" title="刷新 Token 统计" aria-label="刷新 Token 统计">
+          <i data-lucide="refresh-cw"></i>
+        </button>
+      </div>
+      <div class="usage-summary" aria-label="Token 总量概览">
+        <article class="usage-stat"><span>累计 Token</span><strong id="usageTotal">0</strong><small>输入 + 输出</small></article>
+        <article class="usage-stat"><span>输入 Token</span><strong id="usageInput">0</strong><small>包含缓存输入</small></article>
+        <article class="usage-stat"><span>输出 Token</span><strong id="usageOutput">0</strong><small>模型生成内容</small></article>
+        <article class="usage-stat"><span>请求轮数</span><strong id="usageTurns">0</strong><small>已完成的 Codex 请求</small></article>
+      </div>
+      <section class="usage-panel" aria-labelledby="usageChartTitle">
+        <div class="usage-panel-heading">
+          <div><p class="eyebrow">SESSION BREAKDOWN</p><h2 id="usageChartTitle">按会话用量</h2></div>
+          <div class="usage-legend" aria-label="图例"><span><i class="usage-legend-input"></i>输入</span><span><i class="usage-legend-output"></i>输出</span></div>
+        </div>
+        <div id="usageChart" class="usage-chart" role="img" aria-label="按会话显示输入和输出 Token 的水平条形图"></div>
+        <div id="usageEmpty" class="usage-empty" hidden>暂无 Token 使用记录，完成一次 Codex 请求后会显示统计数据。</div>
+      </section>
     </section>
 
     <section class="view settings-view" id="settingsView" data-view-panel="settings" hidden>
