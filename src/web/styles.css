@@ -155,7 +155,8 @@ h2 { margin: 0; font-size: 19px; line-height: 1.3; }
 .session-owner { min-width: 0; color: var(--ink-soft); display: flex; gap: 6px; font-size: 10px; }
 .session-owner strong, .session-owner span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-owner strong { color: var(--ink); }
-.session-workspace, .session-thread { overflow: hidden; color: var(--ink-soft); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.session-workspace, .session-thread, .session-token-usage { overflow: hidden; color: var(--ink-soft); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.session-token-usage { color: var(--green-dark); }
 .session-thread.is-responding { color: var(--green-dark); font-family: inherit; font-weight: 750; }
 .session-actions { padding: 0 12px 12px 17px; display: flex; gap: 5px; }
 .session-actions .icon-button { width: 29px; height: 29px; background: transparent; }

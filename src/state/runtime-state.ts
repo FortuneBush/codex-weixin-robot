@@ -5,6 +5,24 @@ import path from "node:path";
 import { readJsonFile, writeJsonFile } from "./json-store.js";
 import type { StatePaths } from "./paths.js";
 
+export type SessionTokenUsage = {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  cachedInputTokens: number;
+  turnCount: number;
+  lastUsedAt: string;
+};
+
+export type SessionTokenUsageRecord = {
+  at: string;
+  threadId?: string;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  cachedInputTokens: number;
+};
+
 export type ManagedSession = {
   id: string;
   senderId: string;
@@ -15,6 +33,8 @@ export type ManagedSession = {
   model?: string;
   effort?: string;
   streamReplies?: boolean;
+  tokenUsage?: SessionTokenUsage;
+  tokenUsageRecords?: SessionTokenUsageRecord[];
   createdAt: string;
   updatedAt: string;
 };
@@ -296,6 +316,33 @@ export class RuntimeStateStore {
       delete session.threadId;
     }
     session.updatedAt = new Date().toISOString();
+    this.save();
+    return structuredClone(session);
+  }
+
+  recordTokenUsage(sessionId: string, usage: {
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+    cachedInputTokens: number;
+  } | undefined, threadId?: string): ManagedSession {
+    const session = this.mutableSession(sessionId);
+    if (!usage) return structuredClone(session);
+    const at = new Date().toISOString();
+    const previous = session.tokenUsage;
+    session.tokenUsage = {
+      inputTokens: (previous?.inputTokens ?? 0) + usage.inputTokens,
+      outputTokens: (previous?.outputTokens ?? 0) + usage.outputTokens,
+      totalTokens: (previous?.totalTokens ?? 0) + usage.totalTokens,
+      cachedInputTokens: (previous?.cachedInputTokens ?? 0) + usage.cachedInputTokens,
+      turnCount: (previous?.turnCount ?? 0) + 1,
+      lastUsedAt: at
+    };
+    session.tokenUsageRecords = [
+      ...(session.tokenUsageRecords ?? []),
+      { at, ...(threadId ? { threadId } : {}), ...usage }
+    ].slice(-1_000);
+    session.updatedAt = at;
     this.save();
     return structuredClone(session);
   }

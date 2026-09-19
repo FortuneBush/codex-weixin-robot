@@ -111,6 +111,43 @@ test("updates model, effort, and streaming by managed session id for Web control
   assert.equal(store.getSession(first.id)?.streamReplies, undefined);
 });
 
+test("accumulates and persists token usage per managed session", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-token-usage-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const paths = resolveStatePaths(root);
+  const store = new RuntimeStateStore(paths);
+  const session = store.createSession("alice@im.wechat", "/work/one");
+
+  store.recordTokenUsage(session.id, {
+    inputTokens: 100,
+    outputTokens: 40,
+    totalTokens: 140,
+    cachedInputTokens: 20
+  }, "thread-one");
+  store.recordTokenUsage(session.id, {
+    inputTokens: 50,
+    outputTokens: 10,
+    totalTokens: 60,
+    cachedInputTokens: 0
+  }, "thread-one");
+
+  const reloaded = new RuntimeStateStore(paths).getSession(session.id);
+  assert.deepEqual(reloaded?.tokenUsage && {
+    inputTokens: reloaded.tokenUsage.inputTokens,
+    outputTokens: reloaded.tokenUsage.outputTokens,
+    totalTokens: reloaded.tokenUsage.totalTokens,
+    cachedInputTokens: reloaded.tokenUsage.cachedInputTokens,
+    turnCount: reloaded.tokenUsage.turnCount
+  }, {
+    inputTokens: 150,
+    outputTokens: 50,
+    totalTokens: 200,
+    cachedInputTokens: 20,
+    turnCount: 2
+  });
+  assert.equal(reloaded?.tokenUsageRecords?.length, 2);
+});
+
 test("persistently claims inbound message ids once and bounds the history", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-dedupe-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

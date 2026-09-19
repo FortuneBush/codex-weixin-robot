@@ -171,7 +171,13 @@ test("extracts nested agent_message text and thread id from codex json output", 
   assert.equal(extractFinalText(raw), "我是 Codex，基于 GPT-5 的编程协作助手。");
   assert.deepEqual(parseCodexExecOutput(raw), {
     text: "我是 Codex，基于 GPT-5 的编程协作助手。",
-    threadId: "019f2ac8-4d54-7970-9490-f6675d60286a"
+    threadId: "019f2ac8-4d54-7970-9490-f6675d60286a",
+    usage: {
+      inputTokens: 1,
+      outputTokens: 0,
+      totalTokens: 1,
+      cachedInputTokens: 0
+    }
   });
 });
 

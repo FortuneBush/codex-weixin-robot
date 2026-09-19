@@ -410,6 +410,7 @@ export class AccountManager {
         throw new Error("Codex did not return a thread id");
       }
       store.setSessionThread(session.id, threadId);
+      store.recordTokenUsage(session.id, result.usage, threadId);
       const parsed = parseAssistantMessage(result.text);
       return {
         threadId,

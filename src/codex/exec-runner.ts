@@ -3,6 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 
 import type { CodexExecSandbox } from "./sandbox.js";
+import type { CodexTokenUsage } from "./usage.js";
+import { parseCodexTokenUsage } from "./usage.js";
 
 export type BuildCodexExecArgsInput = {
   prompt: string;
@@ -56,6 +58,7 @@ export type CodexRunResult = {
   text: string;
   threadId?: string;
   raw: string;
+  usage?: CodexTokenUsage;
 };
 
 export class CodexExecRunner {
@@ -111,7 +114,7 @@ export class CodexExecRunner {
           return;
         }
         const parsed = parseCodexExecOutput(raw);
-        resolve({ raw, text: parsed.text, threadId: parsed.threadId });
+        resolve({ raw, text: parsed.text, threadId: parsed.threadId, ...(parsed.usage ? { usage: parsed.usage } : {}) });
       });
     });
   }
@@ -212,10 +215,11 @@ function resolveMacDesktopCodex(
   return candidates.find((candidate): candidate is string => Boolean(candidate && existsSync(candidate)));
 }
 
-export function parseCodexExecOutput(raw: string): { text: string; threadId?: string } {
+export function parseCodexExecOutput(raw: string): { text: string; threadId?: string; usage?: CodexTokenUsage } {
   const lines = raw.split(/\r?\n/).filter(Boolean);
   let lastText = "";
   let threadId: string | undefined;
+  let usage: CodexTokenUsage | undefined;
   for (const line of lines) {
     try {
       const event = JSON.parse(line) as Record<string, unknown>;
@@ -223,6 +227,9 @@ export function parseCodexExecOutput(raw: string): { text: string; threadId?: st
       if (type === "thread.started" && typeof event.thread_id === "string") {
         threadId = event.thread_id;
         continue;
+      }
+      if (type === "turn.completed" || type === "turn.completed.v2") {
+        usage = parseCodexTokenUsage(event.usage);
       }
 
       const item = event.item as Record<string, unknown> | undefined;
@@ -241,7 +248,7 @@ export function parseCodexExecOutput(raw: string): { text: string; threadId?: st
       lastText = line;
     }
   }
-  return { text: lastText || raw.trim(), threadId };
+  return { text: lastText || raw.trim(), threadId, ...(usage ? { usage } : {}) };
 }
 
 export function extractFinalText(raw: string): string {

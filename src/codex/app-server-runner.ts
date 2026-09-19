@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import readline from "node:readline";
 
 import { resolveCodexCommand, type CodexRunResult } from "./exec-runner.js";
+import { parseCodexTokenUsage, type CodexTokenUsage } from "./usage.js";
 
 export type AppServerRunnerOptions = {
   codexBin?: string;
@@ -58,6 +59,7 @@ type TurnCompletion = {
   text: string;
   raw: string;
   error?: string;
+  usage?: CodexTokenUsage;
 };
 
 type TurnWaiter = {
@@ -445,7 +447,8 @@ export class AppServerCodexRunner {
       status,
       text: this.turnTexts.get(key) ?? extractAgentMessageFromTurn(turn),
       raw: (this.turnEvents.get(key) ?? []).join("\n"),
-      error: typeof errorValue?.message === "string" ? errorValue.message : undefined
+      error: typeof errorValue?.message === "string" ? errorValue.message : undefined,
+      usage: parseCodexTokenUsage(turn?.usage ?? params.usage)
     };
     this.activeTurns.delete(threadId);
     const waiter = this.turnWaiters.get(key);
@@ -497,7 +500,12 @@ export class AppServerCodexRunner {
     this.queuedTurnEvents.delete(key);
     this.itemPhasesByTurn.delete(key);
     if (completion.status === "completed") {
-      resolve({ text: completion.text, threadId, raw: completion.raw });
+      resolve({
+        text: completion.text,
+        threadId,
+        raw: completion.raw,
+        ...(completion.usage ? { usage: completion.usage } : {})
+      });
       return;
     }
     if (completion.status === "interrupted") {

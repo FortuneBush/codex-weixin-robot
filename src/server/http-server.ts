@@ -185,6 +185,31 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
     sendJson(response, 200, { sessions: context.accountManager.listSessions() });
     return;
   }
+  if (method === "GET" && url.pathname === "/api/usage") {
+    const sessions = context.accountManager.listSessions();
+    const totals = sessions.reduce((sum, session) => {
+      const usage = session.tokenUsage;
+      if (!usage) return sum;
+      sum.inputTokens += usage.inputTokens;
+      sum.outputTokens += usage.outputTokens;
+      sum.totalTokens += usage.totalTokens;
+      sum.cachedInputTokens += usage.cachedInputTokens;
+      sum.turnCount += usage.turnCount;
+      return sum;
+    }, { inputTokens: 0, outputTokens: 0, totalTokens: 0, cachedInputTokens: 0, turnCount: 0 });
+    sendJson(response, 200, {
+      totals,
+      sessions: sessions.filter((session) => session.tokenUsage).map((session) => ({
+        accountId: session.accountId,
+        sessionId: session.id,
+        title: session.title,
+        workspace: session.workspace,
+        usage: session.tokenUsage,
+        records: session.tokenUsageRecords ?? []
+      }))
+    });
+    return;
+  }
   if (method === "POST" && url.pathname === "/api/logins") {
     sendJson(response, 201, await context.loginManager.start());
     return;

@@ -400,6 +400,7 @@ export class BridgeService {
         if (result.threadId) {
           this.options.stateStore.setThread(message.senderId, result.threadId);
         }
+        this.options.stateStore.recordTokenUsage(session.id, result.usage, result.threadId);
         const parsed = parseActionBlocks(result.text);
         const remaining = chunkText(parsed.visibleText);
         if (remaining.length) {

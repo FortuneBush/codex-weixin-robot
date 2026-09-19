@@ -462,6 +462,7 @@ function renderSessions() {
         <span class="session-owner"><strong>${escapeHtml(accountDisplayName(session.accountId))}</strong></span>
         <span class="session-workspace" title="${escapeAttr(session.workspace)}">${escapeHtml(session.workspace)}</span>
         <span class="session-thread${session.responding ? " is-responding" : ""}">${session.responding ? "对方正在输入…" : session.threadId ? "已连接 Codex" : "等待首条消息"}</span>
+        ${session.tokenUsage ? `<span class="session-token-usage">Token ${formatTokenCount(session.tokenUsage.totalTokens)} · ${session.tokenUsage.turnCount} 轮</span>` : ""}
       </button>
       <div class="session-actions">
         <button class="icon-button" type="button" data-session-action="activate" data-account-id="${escapeAttr(session.accountId)}" data-session-id="${escapeAttr(session.id)}" ${session.active ? "disabled" : ""} title="切换为微信当前会话" aria-label="切换为微信当前会话"><i data-lucide="circle-play"></i></button>
@@ -1398,6 +1399,12 @@ function relativeTime(value) {
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours} 小时前`;
   return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit" }).format(new Date(value));
+}
+
+function formatTokenCount(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "0";
+  return new Intl.NumberFormat("zh-CN", { notation: "compact", maximumFractionDigits: 1 }).format(number);
 }
 
 function messageTime(value) {
