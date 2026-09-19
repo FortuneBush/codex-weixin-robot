@@ -113,7 +113,8 @@ export class AccountManager {
     this.runnerFactory = options.runnerFactory ?? ((config) => new HybridCodexRunner({
       backend: config.codexBackend,
       codexBin: config.codexBin,
-      execSandbox: config.codexExecSandbox
+      execSandbox: config.codexExecSandbox,
+      timeoutMs: config.codexTimeoutMs
     }));
   }
 
@@ -157,9 +158,9 @@ export class AccountManager {
 
     const controller = new AbortController();
     const statePaths = accountStatePaths(this.options.paths, account.accountId);
-    const store = new RuntimeStateStore(statePaths);
     const client = this.clientFactory(account);
     const config = this.configProvider();
+    const store = new RuntimeStateStore(statePaths, config.sessionWorkspaceRoot);
     const service = this.bridgeFactory({
       config,
       stateStore: store,
@@ -286,7 +287,7 @@ export class AccountManager {
 
   createSession(accountId: string, senderId: string, workspace?: string, title?: string): AccountSession {
     const config = this.configProvider();
-    const targetWorkspace = workspace ?? config.defaultCwd;
+    const targetWorkspace = config.sessionWorkspaceRoot ?? workspace ?? config.defaultCwd;
     if (!isWorkspaceAllowed(targetWorkspace, config.allowedWorkspaces)) {
       throw new Error(`Workspace is not allowed: ${targetWorkspace}`);
     }
@@ -477,7 +478,10 @@ export class AccountManager {
   private storeFor(accountId: string): RuntimeStateStore {
     const account = loadAccount(this.options.paths, accountId);
     return this.entries.get(account.accountId)?.store
-      ?? new RuntimeStateStore(accountStatePaths(this.options.paths, account.accountId));
+      ?? new RuntimeStateStore(
+        accountStatePaths(this.options.paths, account.accountId),
+        this.configProvider().sessionWorkspaceRoot
+      );
   }
 
   private isActive(accountId: string, sessionId: string): boolean {
@@ -520,7 +524,10 @@ export class AccountManager {
 
   private summary(account: WeixinAccount): AccountSummary {
     const entry = this.entries.get(account.accountId);
-    const store = entry?.store ?? new RuntimeStateStore(accountStatePaths(this.options.paths, account.accountId));
+    const store = entry?.store ?? new RuntimeStateStore(
+      accountStatePaths(this.options.paths, account.accountId),
+      this.configProvider().sessionWorkspaceRoot
+    );
     return {
       ...publicAccount(account),
       status: entry?.status ?? "stopped",

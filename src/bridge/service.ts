@@ -41,7 +41,8 @@ export class BridgeService {
     this.runner = options.runner ?? new HybridCodexRunner({
       backend: options.config.codexBackend,
       codexBin: options.config.codexBin,
-      execSandbox: options.config.codexExecSandbox
+      execSandbox: options.config.codexExecSandbox,
+      timeoutMs: options.config.codexTimeoutMs
     });
   }
 
@@ -92,7 +93,10 @@ export class BridgeService {
         await this.bindWorkspace(message.senderId, command.arg);
         return;
       case "new":
-        this.options.stateStore.createSession(message.senderId, this.options.stateStore.getWorkspace(message.senderId) ?? this.options.config.defaultCwd);
+        this.options.stateStore.createSession(
+          message.senderId,
+          this.options.config.sessionWorkspaceRoot ?? this.options.config.defaultCwd
+        );
         await this.reply(message.senderId, "Created a new Codex session for the next message.");
         return;
       case "resume":

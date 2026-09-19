@@ -49,7 +49,7 @@ export function buildCodexExecArgs(input: BuildCodexExecArgsInput): string[] {
 export type CodexExecRunnerOptions = {
   codexBin?: string;
   sandbox?: CodexExecSandbox;
-  timeoutMs?: number;
+  timeoutMs?: number | null;
 };
 
 export type CodexRunResult = {
@@ -65,7 +65,7 @@ export class CodexExecRunner {
 
   run(input: BuildCodexExecArgsInput): Promise<CodexRunResult> {
     const codexCommand = resolveCodexCommand(this.options.codexBin ?? "codex");
-    const timeoutMs = this.options.timeoutMs ?? 600_000;
+    const timeoutMs = this.options.timeoutMs;
     const args = buildCodexExecArgs({
       ...input,
       sandbox: this.options.sandbox ?? input.sandbox
@@ -86,21 +86,23 @@ export class CodexExecRunner {
           this.activeRuns.splice(index, 1);
         }
       };
-      const timer = setTimeout(() => {
-        child.kill();
-        reject(new Error(`codex exec timed out after ${timeoutMs}ms`));
-      }, timeoutMs);
+      const timer = timeoutMs === null
+        ? undefined
+        : setTimeout(() => {
+          child.kill();
+          reject(new Error(`codex exec timed out after ${timeoutMs}ms`));
+        }, timeoutMs ?? 600_000);
       const stdout: Buffer[] = [];
       const stderr: Buffer[] = [];
       child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
       child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
       child.on("error", (error) => {
-        clearTimeout(timer);
+        if (timer) clearTimeout(timer);
         removeActiveRun();
         reject(error);
       });
       child.on("close", (code) => {
-        clearTimeout(timer);
+        if (timer) clearTimeout(timer);
         removeActiveRun();
         const raw = Buffer.concat(stdout).toString("utf8");
         const err = Buffer.concat(stderr).toString("utf8");

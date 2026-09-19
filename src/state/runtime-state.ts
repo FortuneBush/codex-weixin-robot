@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
 import path from "node:path";
 
 import { readJsonFile, writeJsonFile } from "./json-store.js";
@@ -54,8 +55,9 @@ export function emptyRuntimeState(): RuntimeState {
 export class RuntimeStateStore {
   private state: RuntimeState;
 
-  constructor(private readonly paths: StatePaths) {
+  constructor(private readonly paths: StatePaths, private readonly workspaceRoot?: string) {
     this.state = normalizeRuntimeState(readJsonFile<Partial<RuntimeState>>(paths.statePath, {}));
+    this.migrateSessionWorkspaces();
   }
 
   get snapshot(): RuntimeState {
@@ -115,7 +117,9 @@ export class RuntimeStateStore {
   setWorkspace(senderId: string, workspace: string): void {
     this.ensureActiveSession(senderId, workspace);
     const session = this.mutableActiveSession(senderId)!;
-    session.workspace = path.resolve(workspace);
+    session.workspace = this.workspaceRoot
+      ? this.sessionWorkspacePath(session.id)
+      : path.resolve(workspace);
     delete session.threadId;
     session.updatedAt = new Date().toISOString();
     this.save();
@@ -212,11 +216,12 @@ export class RuntimeStateStore {
   createSession(senderId: string, workspace: string, title?: string): ManagedSession {
     const now = new Date().toISOString();
     const number = this.state.sessions.filter((session) => session.senderId === senderId).length + 1;
+    const id = crypto.randomUUID();
     const session: ManagedSession = {
-      id: crypto.randomUUID(),
+      id,
       senderId,
       title: cleanTitle(title) ?? `会话 ${number}`,
-      workspace: path.resolve(workspace),
+      workspace: this.workspaceRoot ? this.sessionWorkspacePath(id) : path.resolve(workspace),
       createdAt: now,
       updatedAt: now
     };
@@ -224,6 +229,26 @@ export class RuntimeStateStore {
     this.state.activeSessionIds[senderId] = session.id;
     this.save();
     return structuredClone(session);
+  }
+
+  private sessionWorkspacePath(sessionId: string): string {
+    const workspace = path.join(path.resolve(this.workspaceRoot!), sessionId);
+    fs.mkdirSync(workspace, { recursive: true });
+    return workspace;
+  }
+
+  private migrateSessionWorkspaces(): void {
+    if (!this.workspaceRoot) return;
+    let changed = false;
+    for (const session of this.state.sessions) {
+      const workspace = this.sessionWorkspacePath(session.id);
+      if (session.workspace !== workspace) {
+        session.workspace = workspace;
+        session.updatedAt = new Date().toISOString();
+        changed = true;
+      }
+    }
+    if (changed) this.save();
   }
 
   setSessionPromptPreview(sessionId: string, preview: string): ManagedSession {

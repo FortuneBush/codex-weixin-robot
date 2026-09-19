@@ -14,7 +14,7 @@ export type HybridCodexRunnerOptions = {
   backend: CodexBackend;
   codexBin?: string;
   execSandbox?: CodexExecSandbox;
-  timeoutMs?: number;
+  timeoutMs?: number | null;
 };
 
 export class HybridCodexRunner {

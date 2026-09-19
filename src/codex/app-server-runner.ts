@@ -5,7 +5,7 @@ import { resolveCodexCommand, type CodexRunResult } from "./exec-runner.js";
 
 export type AppServerRunnerOptions = {
   codexBin?: string;
-  requestTimeoutMs?: number;
+  requestTimeoutMs?: number | null;
 };
 
 export type CodexRunnerInput = {
@@ -292,7 +292,9 @@ export class AppServerCodexRunner {
           experimentalApi: false,
           requestAttestation: false
         }
-      }, Math.min(this.options.requestTimeoutMs ?? 600_000, 15_000));
+      }, this.options.requestTimeoutMs === null
+        ? 15_000
+        : Math.min(this.options.requestTimeoutMs ?? 600_000, 15_000));
       this.notify("initialized", {});
       this.initialized = true;
     } catch (error) {
@@ -304,21 +306,23 @@ export class AppServerCodexRunner {
   private request(
     method: string,
     params: Record<string, unknown>,
-    timeoutMs = this.options.requestTimeoutMs ?? 600_000
+    timeoutMs = this.options.requestTimeoutMs
   ): Promise<unknown> {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        const error = new Error(`app-server request ${method} timed out after ${timeoutMs}ms`);
-        this.pending.delete(id);
-        reject(error);
-        this.failTransport(error, true);
-      }, timeoutMs);
-      this.pending.set(id, { method, resolve, reject, timer });
+      const timer = timeoutMs === null
+        ? undefined
+        : setTimeout(() => {
+          const error = new Error(`app-server request ${method} timed out after ${timeoutMs}ms`);
+          this.pending.delete(id);
+          reject(error);
+          this.failTransport(error, true);
+        }, timeoutMs ?? 600_000);
+      this.pending.set(id, { method, resolve, reject, timer: timer as NodeJS.Timeout });
       try {
         this.send({ id, method, params });
       } catch (error) {
-        clearTimeout(timer);
+        if (timer) clearTimeout(timer);
         this.pending.delete(id);
         reject(error);
       }
@@ -464,15 +468,17 @@ export class AppServerCodexRunner {
       });
     }
 
-    const timeoutMs = this.options.requestTimeoutMs ?? 600_000;
+    const timeoutMs = this.options.requestTimeoutMs;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.turnWaiters.delete(key);
-        const error = new Error(`app-server turn timed out after ${timeoutMs}ms`);
-        reject(error);
-        this.failTransport(error, true);
-      }, timeoutMs);
-      this.turnWaiters.set(key, { resolve, reject, timer });
+      const timer = timeoutMs === null
+        ? undefined
+        : setTimeout(() => {
+          this.turnWaiters.delete(key);
+          const error = new Error(`app-server turn timed out after ${timeoutMs}ms`);
+          reject(error);
+          this.failTransport(error, true);
+        }, timeoutMs ?? 600_000);
+      this.turnWaiters.set(key, { resolve, reject, timer: timer as NodeJS.Timeout });
     });
   }
 
