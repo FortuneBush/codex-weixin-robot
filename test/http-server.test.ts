@@ -133,9 +133,9 @@ test("local API redacts credentials and protects mutations", async (t) => {
   assert.match(pageHtml, /<link rel="icon" href="\/favicon\.svg" type="image\/svg\+xml">/);
   assert.match(
     pageHtml,
-    /href="https:\/\/github\.com\/XavierJiezou\/codex-weixin" target="_blank" rel="noopener noreferrer"/
+    /href="https:\/\/github\.com\/FortuneBush\/codex-weixin-robot" target="_blank" rel="noopener noreferrer"/
   );
-  assert.match(pageHtml, /id="updateCheckButton"/);
+  assert.doesNotMatch(pageHtml, /id="updateCheckButton"/);
   assert.match(pageHtml, /id="removeAccountDialog"/);
   assert.match(pageHtml, /重新扫码后恢复/);
   const faviconResponse = await fetch(`${server.url}/favicon.svg`);

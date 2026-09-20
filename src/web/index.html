@@ -30,7 +30,7 @@
         <button class="tab" type="button" data-view="settings">设置</button>
       </nav>
       <div class="header-actions">
-        <a class="icon-button github-link" href="https://github.com/XavierJiezou/codex-weixin" target="_blank" rel="noopener noreferrer" title="前往 GitHub" aria-label="前往 codex-weixin GitHub 仓库">
+        <a class="icon-button github-link" href="https://github.com/FortuneBush/codex-weixin-robot" target="_blank" rel="noopener noreferrer" title="前往 GitHub" aria-label="前往 codex-weixin GitHub 仓库">
           <i data-lucide="github"></i>
         </a>
         <button class="button button-primary header-action" id="addAccountButton" type="button" title="添加微信" aria-label="添加微信">
@@ -235,10 +235,6 @@
               <small>当前版本</small>
               <strong id="settingsVersionValue">--</strong>
             </span>
-            <button class="button button-secondary" id="updateCheckButton" type="button">
-              <i data-lucide="refresh-cw"></i>
-              <span>检查更新</span>
-            </button>
           </div>
         </div>
         <div class="form-actions">
@@ -250,35 +246,6 @@
       </form>
     </section>
   </main>
-
-  <dialog class="modal update-modal" id="updateDialog" aria-labelledby="updateDialogTitle">
-    <div class="modal-header update-modal-header">
-      <div>
-        <p class="eyebrow">PRODUCT UPDATE</p>
-        <h2 id="updateDialogTitle">发现新版本</h2>
-      </div>
-      <span class="update-modal-icon" aria-hidden="true"><i data-lucide="package"></i></span>
-    </div>
-    <div class="modal-body update-modal-body">
-      <div class="update-version-flow" aria-label="版本升级">
-        <span class="update-version-item"><small>当前版本</small><strong id="updateCurrentVersion">--</strong></span>
-        <span class="update-version-divider" aria-hidden="true"></span>
-        <span class="update-version-item is-latest"><small>最新版本</small><strong id="updateLatestVersion">--</strong></span>
-      </div>
-      <p class="update-description">更新期间微信连接会短暂中断，完成后服务将自动重启并恢复连接。</p>
-      <div class="update-progress" id="updateProgress" aria-live="polite" hidden>
-        <span class="spinner" aria-hidden="true"></span>
-        <div><strong id="updateProgressTitle">正在安装更新</strong><span id="updateProgressDetail">请保持此页面打开</span></div>
-      </div>
-    </div>
-    <div class="modal-footer">
-      <button class="button button-secondary" id="updateLaterButton" type="button">稍后</button>
-      <button class="button button-primary" id="updateNowButton" type="button">
-        <i data-lucide="download"></i>
-        <span>立即更新</span>
-      </button>
-    </div>
-  </dialog>
 
   <dialog class="modal qr-modal" id="qrDialog">
     <div class="modal-header">
