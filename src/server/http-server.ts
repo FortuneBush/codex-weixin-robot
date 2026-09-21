@@ -16,6 +16,20 @@ import type { AccountManager, SessionAttachmentFile, SessionHistoryMessage, Sess
 import { LoginManager } from "./login-manager.js";
 import { UpdateManager, type UpdateService } from "./update-manager.js";
 
+type UsageNumbers = {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  cachedInputTokens: number;
+  turnCount: number;
+  lastUsedAt?: string;
+};
+
+type UsageMetrics = UsageNumbers & {
+  /** Ratio of cached input tokens to all input tokens, in the range 0..1. */
+  cacheHitRate: number;
+};
+
 const bodySchema = z.record(z.string(), z.unknown());
 const accountDisplayNameSchema = z.object({
   displayName: z.string().max(40)
@@ -187,25 +201,59 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
   }
   if (method === "GET" && url.pathname === "/api/usage") {
     const sessions = context.accountManager.listSessions();
-    const totals = sessions.reduce((sum, session) => {
+    const usageSessions = sessions.filter((session) => session.tokenUsage);
+    const totals = withCacheHitRate(usageSessions.reduce((sum, session) => {
       const usage = session.tokenUsage;
       if (!usage) return sum;
-      sum.inputTokens += usage.inputTokens;
-      sum.outputTokens += usage.outputTokens;
-      sum.totalTokens += usage.totalTokens;
-      sum.cachedInputTokens += usage.cachedInputTokens;
-      sum.turnCount += usage.turnCount;
+      sum.inputTokens += finiteUsageNumber(usage.inputTokens);
+      sum.outputTokens += finiteUsageNumber(usage.outputTokens);
+      sum.totalTokens += finiteUsageNumber(usage.totalTokens);
+      sum.cachedInputTokens += finiteUsageNumber(usage.cachedInputTokens);
+      sum.turnCount += finiteUsageNumber(usage.turnCount);
       return sum;
-    }, { inputTokens: 0, outputTokens: 0, totalTokens: 0, cachedInputTokens: 0, turnCount: 0 });
+    }, emptyUsageNumbers()));
+
+    // Keep a compact time series alongside the session breakdown so clients can
+    // render trend charts without having to duplicate aggregation logic. The
+    // bucket key is the ISO calendar date, making it deterministic across hosts.
+    const timeline = new Map<string, UsageNumbers>();
+    for (const session of usageSessions) {
+      for (const record of session.tokenUsageRecords ?? []) {
+        const date = typeof record.at === "string" ? record.at.slice(0, 10) : "";
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+        const bucket = timeline.get(date) ?? emptyUsageNumbers();
+        bucket.inputTokens += finiteUsageNumber(record.inputTokens);
+        bucket.outputTokens += finiteUsageNumber(record.outputTokens);
+        bucket.totalTokens += finiteUsageNumber(record.totalTokens);
+        bucket.cachedInputTokens += finiteUsageNumber(record.cachedInputTokens);
+        bucket.turnCount += 1;
+        timeline.set(date, bucket);
+      }
+    }
+
     sendJson(response, 200, {
       totals,
-      sessions: sessions.filter((session) => session.tokenUsage).map((session) => ({
+      timeline: [...timeline.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([date, usage]) => ({
+        date,
+        ...withCacheHitRate(usage)
+      })),
+      sessions: usageSessions.map((session) => ({
         accountId: session.accountId,
         sessionId: session.id,
         title: session.title,
         workspace: session.workspace,
-        usage: session.tokenUsage,
-        records: session.tokenUsageRecords ?? []
+        usage: withCacheHitRate({
+          inputTokens: session.tokenUsage!.inputTokens,
+          outputTokens: session.tokenUsage!.outputTokens,
+          totalTokens: session.tokenUsage!.totalTokens,
+          cachedInputTokens: session.tokenUsage!.cachedInputTokens,
+          turnCount: session.tokenUsage!.turnCount,
+          lastUsedAt: session.tokenUsage!.lastUsedAt
+        }),
+        records: (session.tokenUsageRecords ?? []).map((record) => ({
+          ...record,
+          cacheHitRate: cacheHitRate(record.inputTokens, record.cachedInputTokens)
+        }))
       }))
     });
     return;
@@ -558,6 +606,23 @@ async function readSessionMessageBody(
 
 function formatByteLimit(bytes: number): string {
   return bytes % (1024 * 1024) === 0 ? `${bytes / (1024 * 1024)} MiB` : `${bytes} byte${bytes === 1 ? "" : "s"}`;
+}
+
+function emptyUsageNumbers(): UsageNumbers {
+  return { inputTokens: 0, outputTokens: 0, totalTokens: 0, cachedInputTokens: 0, turnCount: 0 };
+}
+
+function cacheHitRate(inputTokens: number, cachedInputTokens: number): number {
+  if (!Number.isFinite(inputTokens) || inputTokens <= 0) return 0;
+  return Math.min(1, Math.max(0, cachedInputTokens / inputTokens));
+}
+
+function finiteUsageNumber(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+}
+
+function withCacheHitRate(usage: UsageNumbers): UsageMetrics {
+  return { ...usage, cacheHitRate: cacheHitRate(usage.inputTokens, usage.cachedInputTokens) };
 }
 
 function requiredString(value: unknown, name: string): string {

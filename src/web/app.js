@@ -15,7 +15,13 @@ const state = {
   sendingMessage: false,
   savingSessionRuntime: false,
   selectedAccountId: "",
-  chatFiles: []
+  chatFiles: [],
+  usageAccountFilter: "",
+  usageSessionFilter: "",
+  usageSort: "total",
+  usagePageSize: 10,
+  usageSessionPage: 1,
+  usageRecentPage: 1
 };
 
 const MAX_CHAT_FILES = 10;
@@ -51,9 +57,27 @@ document.addEventListener("DOMContentLoaded", () => {
     usageTotal: document.querySelector("#usageTotal"),
     usageInput: document.querySelector("#usageInput"),
     usageOutput: document.querySelector("#usageOutput"),
+    usageCacheRate: document.querySelector("#usageCacheRate"),
+    usageCacheDetail: document.querySelector("#usageCacheDetail"),
     usageTurns: document.querySelector("#usageTurns"),
+    usageAvgTurn: document.querySelector("#usageAvgTurn"),
     usageChart: document.querySelector("#usageChart"),
     usageEmpty: document.querySelector("#usageEmpty"),
+    usageTrend: document.querySelector("#usageTrend"),
+    usageTrendEmpty: document.querySelector("#usageTrendEmpty"),
+    usageMix: document.querySelector("#usageMix"),
+    usageMixStats: document.querySelector("#usageMixStats"),
+    usageRecent: document.querySelector("#usageRecent"),
+    usageRecentCount: document.querySelector("#usageRecentCount"),
+    usageRecentEmpty: document.querySelector("#usageRecentEmpty"),
+    usageAccountFilter: document.querySelector("#usageAccountFilter"),
+    usageSessionFilter: document.querySelector("#usageSessionFilter"),
+    usageSortFilter: document.querySelector("#usageSortFilter"),
+    usagePageSize: document.querySelector("#usagePageSize"),
+    usageResetFilters: document.querySelector("#usageResetFilters"),
+    usageSessionPagination: document.querySelector("#usageSessionPagination"),
+    usageRecentPagination: document.querySelector("#usageRecentPagination"),
+    usageSortNote: document.querySelector("#usageSortNote"),
     qrDialog: document.querySelector("#qrDialog"),
     qrFrame: document.querySelector("#qrFrame"),
     qrStatus: document.querySelector("#qrStatus"),
@@ -93,6 +117,13 @@ function bindEvents() {
   els.accountsList.addEventListener("click", (event) => void handleAccountAction(event));
   els.sessionsList.addEventListener("click", (event) => void handleSessionAction(event));
   els.sessionAccountTabs.addEventListener("click", handleSessionAccountTab);
+  els.usageAccountFilter.addEventListener("change", handleUsageFilterChange);
+  els.usageSessionFilter.addEventListener("change", handleUsageFilterChange);
+  els.usageSortFilter.addEventListener("change", handleUsageFilterChange);
+  els.usagePageSize.addEventListener("change", handleUsagePageSizeChange);
+  els.usageResetFilters.addEventListener("click", resetUsageFilters);
+  els.usageSessionPagination.addEventListener("click", handleUsagePagination);
+  els.usageRecentPagination.addEventListener("click", handleUsagePagination);
   els.qrDialog.addEventListener("close", stopLoginPoll);
   window.addEventListener("hashchange", () => showView(location.hash.slice(1) || "accounts", false));
 }
@@ -1223,50 +1254,314 @@ function shortId(value) {
 }
 
 function relativeTime(value) {
-  const seconds = Math.round((Date.now() - new Date(value).getTime()) / 1000);
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "--";
+  const seconds = Math.round((Date.now() - date.getTime()) / 1000);
   if (seconds < 60) return "刚刚";
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return `${minutes} 分钟前`;
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours} 小时前`;
-  return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit" }).format(new Date(value));
+  return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit" }).format(date);
+}
+
+function handleUsageFilterChange() {
+  state.usageAccountFilter = els.usageAccountFilter.value;
+  state.usageSessionFilter = els.usageSessionFilter.value;
+  state.usageSort = els.usageSortFilter.value;
+  state.usageSessionPage = 1;
+  state.usageRecentPage = 1;
+  renderUsage();
+  drawIcons();
+}
+
+function handleUsagePageSizeChange() {
+  state.usagePageSize = Math.max(1, Number(els.usagePageSize.value) || 10);
+  state.usageSessionPage = 1;
+  state.usageRecentPage = 1;
+  renderUsage();
+}
+
+function resetUsageFilters() {
+  state.usageAccountFilter = "";
+  state.usageSessionFilter = "";
+  state.usageSort = "total";
+  state.usagePageSize = 10;
+  state.usageSessionPage = 1;
+  state.usageRecentPage = 1;
+  renderUsage();
+  drawIcons();
+}
+
+function handleUsagePagination(event) {
+  const button = event.target.closest("button[data-usage-page]");
+  if (!button || button.disabled) return;
+  const page = Number(button.dataset.usagePage);
+  if (!Number.isInteger(page) || page < 1) return;
+  if (button.closest("#usageSessionPagination")) state.usageSessionPage = page;
+  if (button.closest("#usageRecentPagination")) state.usageRecentPage = page;
+  renderUsage();
 }
 
 function renderUsage() {
-  const sessions = state.sessions
-    .filter((session) => session.tokenUsage && session.tokenUsage.totalTokens > 0)
-    .sort((a, b) => (b.tokenUsage.totalTokens || 0) - (a.tokenUsage.totalTokens || 0));
+  const allUsageSessions = state.sessions
+    .filter((session) => session.tokenUsage && (session.tokenUsage.totalTokens || 0) > 0);
+  renderUsageFilters(allUsageSessions);
+  const sessions = filterUsageSessions(allUsageSessions);
   const totals = sessions.reduce((sum, session) => {
     const usage = session.tokenUsage;
     sum.inputTokens += usage.inputTokens || 0;
     sum.outputTokens += usage.outputTokens || 0;
     sum.totalTokens += usage.totalTokens || 0;
+    sum.cachedInputTokens += usage.cachedInputTokens || 0;
     sum.turnCount += usage.turnCount || 0;
     return sum;
-  }, { inputTokens: 0, outputTokens: 0, totalTokens: 0, turnCount: 0 });
+  }, { inputTokens: 0, outputTokens: 0, totalTokens: 0, cachedInputTokens: 0, turnCount: 0 });
+  const cacheRate = ratio(totals.cachedInputTokens, totals.inputTokens);
+  const freshInputTokens = Math.max(0, totals.inputTokens - totals.cachedInputTokens);
+  const records = sessions.flatMap((session) => (session.tokenUsageRecords || []).map((record, index) => ({
+    ...record,
+    session,
+    key: `${session.id}-${record.at || index}-${index}`
+  }))).sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime());
+
   els.usageTotal.textContent = formatTokenCount(totals.totalTokens);
   els.usageInput.textContent = formatTokenCount(totals.inputTokens);
   els.usageOutput.textContent = formatTokenCount(totals.outputTokens);
+  els.usageCacheRate.textContent = totals.inputTokens > 0 ? formatPercent(cacheRate) : "--";
+  els.usageCacheDetail.textContent = totals.inputTokens > 0
+    ? `${formatTokenCount(totals.cachedInputTokens)} / ${formatTokenCount(totals.inputTokens)} Input`
+    : "缓存输入 / 输入 Token";
   els.usageTurns.textContent = formatTokenCount(totals.turnCount);
+  els.usageAvgTurn.textContent = `平均每轮 ${formatTokenCount(totals.turnCount ? totals.totalTokens / totals.turnCount : 0)} Token`;
+  els.usageSortNote.textContent = `当前排序：${usageSortLabel(state.usageSort)} · ${sessions.length} 个会话`;
+
+  renderUsageMix(totals, cacheRate, freshInputTokens);
+  renderUsageTrend(records);
   els.usageEmpty.hidden = sessions.length > 0;
-  if (!sessions.length) {
-    els.usageChart.innerHTML = "";
+  renderUsageSessions(sessions);
+  renderUsageRecent(records);
+}
+
+function renderUsageFilters(sessions) {
+  const accountIds = [...new Set(sessions.map((session) => session.accountId))]
+    .sort((a, b) => accountDisplayName(a).localeCompare(accountDisplayName(b), "zh-CN"));
+  const selectedAccount = accountIds.includes(state.usageAccountFilter) ? state.usageAccountFilter : "";
+  if (selectedAccount !== state.usageAccountFilter) {
+    state.usageAccountFilter = selectedAccount;
+    state.usageSessionFilter = "";
+    state.usageSessionPage = 1;
+    state.usageRecentPage = 1;
+  }
+  const sessionOptions = sessions
+    .filter((session) => !selectedAccount || session.accountId === selectedAccount)
+    .sort((a, b) => a.title.localeCompare(b.title, "zh-CN"));
+  const sessionIds = new Set(sessionOptions.map((session) => session.id));
+  if (state.usageSessionFilter && !sessionIds.has(state.usageSessionFilter)) {
+    state.usageSessionFilter = "";
+    state.usageSessionPage = 1;
+    state.usageRecentPage = 1;
+  }
+  setUsageSelectOptions(els.usageAccountFilter, [
+    ["", "全部账号"],
+    ...accountIds.map((accountId) => [accountId, accountDisplayName(accountId)])
+  ], state.usageAccountFilter);
+  setUsageSelectOptions(els.usageSessionFilter, [
+    ["", "全部会话"],
+    ...sessionOptions.map((session) => [session.id, `${session.title} · ${accountDisplayName(session.accountId)}`])
+  ], state.usageSessionFilter);
+  if (!usageSortValues().some(([value]) => value === state.usageSort)) state.usageSort = "total";
+  els.usageSortFilter.value = state.usageSort;
+  els.usagePageSize.value = String(state.usagePageSize);
+}
+
+function setUsageSelectOptions(select, options, value) {
+  const key = options.map(([optionValue, label]) => `${optionValue}:${label}`).join("|");
+  if (select.dataset.optionsKey !== key) {
+    select.innerHTML = options.map(([optionValue, label]) => `<option value="${escapeAttr(optionValue)}">${escapeHtml(label)}</option>`).join("");
+    select.dataset.optionsKey = key;
+  }
+  select.value = options.some(([optionValue]) => optionValue === value) ? value : options[0]?.[0] || "";
+}
+
+function filterUsageSessions(sessions) {
+  return sessions
+    .filter((session) => !state.usageAccountFilter || session.accountId === state.usageAccountFilter)
+    .filter((session) => !state.usageSessionFilter || session.id === state.usageSessionFilter)
+    .sort((a, b) => compareUsageSessions(a, b, state.usageSort));
+}
+
+function compareUsageSessions(a, b, sort) {
+  const aUsage = a.tokenUsage || {};
+  const bUsage = b.tokenUsage || {};
+  if (sort === "input") return (bUsage.inputTokens || 0) - (aUsage.inputTokens || 0);
+  if (sort === "output") return (bUsage.outputTokens || 0) - (aUsage.outputTokens || 0);
+  if (sort === "cache") return ratio(bUsage.cachedInputTokens || 0, bUsage.inputTokens || 0) - ratio(aUsage.cachedInputTokens || 0, aUsage.inputTokens || 0);
+  if (sort === "recent") return String(bUsage.lastUsedAt || b.updatedAt).localeCompare(String(aUsage.lastUsedAt || a.updatedAt));
+  return (bUsage.totalTokens || 0) - (aUsage.totalTokens || 0);
+}
+
+function usageSortValues() {
+  return [["total", "累计 Token"], ["input", "Input Token"], ["output", "Output Token"], ["cache", "Cache Hit Rate"], ["recent", "最近使用"]];
+}
+
+function usageSortLabel(value) {
+  return usageSortValues().find(([sort]) => sort === value)?.[1] || "累计 Token";
+}
+
+function renderUsageMix(totals, cacheRate, freshInputTokens) {
+  const cachePercent = Math.max(0, Math.min(100, cacheRate * 100));
+  const freshPercent = (100 - cachePercent).toFixed(2);
+  els.usageMix.innerHTML = `<div class="usage-donut" aria-label="缓存输入命中率 ${formatPercent(cacheRate)}">
+    <svg class="usage-donut-svg" viewBox="0 0 100 100" aria-hidden="true"><circle class="usage-donut-track" cx="50" cy="50" r="38" pathLength="100"></circle><circle class="usage-donut-cache" cx="50" cy="50" r="38" pathLength="100" stroke-dasharray="${cachePercent.toFixed(2)} ${freshPercent}"></circle></svg>
+    <div class="usage-donut-center"><strong>${totals.inputTokens > 0 ? formatPercent(cacheRate) : "--"}</strong><span>缓存命中</span></div>
+  </div>`;
+  els.usageMixStats.innerHTML = `<div class="usage-mix-stat usage-mix-stat-cache"><i></i><span>缓存输入</span><strong>${formatTokenCount(totals.cachedInputTokens)}</strong></div>
+    <div class="usage-mix-stat usage-mix-stat-fresh"><i></i><span>未缓存输入</span><strong>${formatTokenCount(freshInputTokens)}</strong></div>
+    <div class="usage-mix-stat usage-mix-stat-output"><i></i><span>Output Token</span><strong>${formatTokenCount(totals.outputTokens)}</strong></div>`;
+}
+
+function renderUsageTrend(records) {
+  const buckets = new Map();
+  records.forEach((record) => {
+    const date = new Date(record.at);
+    if (Number.isNaN(date.getTime())) return;
+    const key = date.toISOString().slice(0, 10);
+    const bucket = buckets.get(key) || { date, input: 0, output: 0, cached: 0, turns: 0 };
+    bucket.input += Number(record.inputTokens) || 0;
+    bucket.output += Number(record.outputTokens) || 0;
+    bucket.cached += Number(record.cachedInputTokens) || 0;
+    bucket.turns += 1;
+    buckets.set(key, bucket);
+  });
+  const points = [...buckets.values()].sort((a, b) => a.date - b.date).slice(-14);
+  els.usageTrendEmpty.hidden = points.length > 0;
+  if (!points.length) {
+    els.usageTrend.innerHTML = "";
     return;
   }
-  const maxTotal = Math.max(...sessions.map((session) => session.tokenUsage.totalTokens || 0), 1);
-  els.usageChart.innerHTML = sessions.map((session) => {
+  const width = 760;
+  const height = 228;
+  const plot = { left: 35, right: 12, top: 16, bottom: 30 };
+  const plotWidth = width - plot.left - plot.right;
+  const plotHeight = height - plot.top - plot.bottom;
+  const max = Math.max(...points.flatMap((point) => [point.input, point.output]), 1);
+  const x = (index) => points.length === 1 ? plot.left + plotWidth / 2 : plot.left + index * plotWidth / (points.length - 1);
+  const y = (value) => plot.top + plotHeight - value / max * plotHeight;
+  const inputPath = points.map((point, index) => `${index ? "L" : "M"}${x(index).toFixed(1)},${y(point.input).toFixed(1)}`).join(" ");
+  const outputPath = points.map((point, index) => `${index ? "L" : "M"}${x(index).toFixed(1)},${y(point.output).toFixed(1)}`).join(" ");
+  const cachedPath = points.map((point, index) => `${index ? "L" : "M"}${x(index).toFixed(1)},${y(point.cached).toFixed(1)}`).join(" ");
+  const inputArea = `${inputPath} L${x(points.length - 1).toFixed(1)},${(plot.top + plotHeight).toFixed(1)} L${x(0).toFixed(1)},${(plot.top + plotHeight).toFixed(1)} Z`;
+  const outputArea = `${outputPath} L${x(points.length - 1).toFixed(1)},${(plot.top + plotHeight).toFixed(1)} L${x(0).toFixed(1)},${(plot.top + plotHeight).toFixed(1)} Z`;
+  const grid = [0, .5, 1].map((step) => {
+    const lineY = plot.top + plotHeight * step;
+    const label = formatTokenCount(max * (1 - step));
+    return `<line class="usage-trend-grid" x1="${plot.left}" x2="${width - plot.right}" y1="${lineY}" y2="${lineY}"></line><text class="usage-trend-axis" x="0" y="${lineY + 3}">${escapeHtml(label)}</text>`;
+  }).join("");
+  const labels = points.map((point, index) => {
+    if (points.length > 5 && index !== 0 && index !== points.length - 1 && index !== Math.floor((points.length - 1) / 2)) return "";
+    return `<text class="usage-trend-axis" text-anchor="${index === 0 ? "start" : index === points.length - 1 ? "end" : "middle"}" x="${x(index)}" y="${height - 7}">${escapeHtml(formatTrendDate(point.date))}</text>`;
+  }).join("");
+  const pointMarkup = (key, className, label) => points.map((point, index) => `<circle class="${className}" cx="${x(index).toFixed(1)}" cy="${y(point[key]).toFixed(1)}" r="3"><title>${escapeHtml(formatTrendDate(point.date))} · ${label} ${formatExactTokenCount(point[key])} Token · ${point.turns} 轮</title></circle>`).join("");
+  els.usageTrend.innerHTML = `<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true">
+    <defs><linearGradient id="usageInputFill" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#12a150" stop-opacity=".18"></stop><stop offset="1" stop-color="#12a150" stop-opacity="0"></stop></linearGradient><linearGradient id="usageOutputFill" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#146bd1" stop-opacity=".14"></stop><stop offset="1" stop-color="#146bd1" stop-opacity="0"></stop></linearGradient></defs>
+    ${grid}<path class="usage-trend-area-input" d="${inputArea}"></path><path class="usage-trend-area-output" d="${outputArea}"></path><path class="usage-trend-line-input" d="${inputPath}"></path><path class="usage-trend-line-output" d="${outputPath}"></path><path class="usage-trend-line-cache" d="${cachedPath}"></path>${pointMarkup("input", "usage-trend-point-input", "Input")}${pointMarkup("output", "usage-trend-point-output", "Output")}${pointMarkup("cached", "usage-trend-point-cache", "Cache")}${labels}
+  </svg>`;
+}
+
+function renderUsageSessions(sessions) {
+  const pageData = paginateUsageItems(sessions, state.usageSessionPage, state.usagePageSize);
+  state.usageSessionPage = pageData.page;
+  if (!sessions.length) {
+    els.usageChart.innerHTML = "";
+    els.usageEmpty.textContent = allUsageFiltersEmpty() ? "暂无 Token 使用记录，完成一次 Codex 请求后会显示统计数据。" : "没有符合当前筛选条件的会话。";
+    renderUsagePagination(els.usageSessionPagination, 1, 0, 0, "usageSessionPage");
+    return;
+  }
+  els.usageChart.innerHTML = pageData.items.map((session) => {
     const usage = session.tokenUsage;
     const total = usage.totalTokens || 0;
-    const inputWidth = Math.max(0, Math.min(100, (usage.inputTokens || 0) / maxTotal * 100));
-    const outputWidth = Math.max(0, Math.min(100, (usage.outputTokens || 0) / maxTotal * 100));
+    const cached = Math.min(usage.cachedInputTokens || 0, usage.inputTokens || 0);
+    const fresh = Math.max(0, (usage.inputTokens || 0) - cached);
+    const scale = Math.max(total, fresh + cached + (usage.outputTokens || 0), 1);
+    const freshWidth = fresh / scale * 100;
+    const cacheWidth = cached / scale * 100;
+    const outputWidth = (usage.outputTokens || 0) / scale * 100;
+    const cacheRate = ratio(cached, usage.inputTokens || 0);
     return `<div class="usage-row">
       <div class="usage-row-label"><strong>${escapeHtml(session.title)}</strong><small>${escapeHtml(accountDisplayName(session.accountId))} · ${usage.turnCount || 0} 轮</small></div>
       <div class="usage-bar" aria-label="${escapeAttr(session.title)}：${formatExactTokenCount(total)} Token">
-        <span class="usage-bar-input" style="width:${inputWidth.toFixed(2)}%"></span><span class="usage-bar-output" style="width:${outputWidth.toFixed(2)}%"></span>
+        <svg class="usage-bar-svg" viewBox="0 0 100 18" preserveAspectRatio="none" aria-hidden="true"><rect class="usage-bar-input" x="0" y="0" width="${freshWidth.toFixed(2)}" height="18" fill="#16a05a"><title>Input（未缓存）${formatExactTokenCount(fresh)} Token</title></rect><rect class="usage-bar-cache" x="${freshWidth.toFixed(2)}" y="0" width="${cacheWidth.toFixed(2)}" height="18" fill="#db9a1b"><title>Cached ${formatExactTokenCount(cached)} Token</title></rect><rect class="usage-bar-output" x="${(freshWidth + cacheWidth).toFixed(2)}" y="0" width="${outputWidth.toFixed(2)}" height="18" fill="#2879d8"><title>Output ${formatExactTokenCount(usage.outputTokens || 0)} Token</title></rect></svg>
       </div>
       <strong class="usage-row-total">${formatTokenCount(total)}</strong>
+      <small class="usage-row-meta">Input ${formatExactTokenCount(usage.inputTokens || 0)} · Cached ${formatExactTokenCount(cached)} · Output ${formatExactTokenCount(usage.outputTokens || 0)} · Hit ${formatPercent(cacheRate)}</small>
     </div>`;
   }).join("");
+  renderUsagePagination(els.usageSessionPagination, pageData.page, pageData.pageCount, pageData.total, "usageSessionPage");
+}
+
+function renderUsageRecent(records) {
+  const pageData = paginateUsageItems(records, state.usageRecentPage, state.usagePageSize);
+  state.usageRecentPage = pageData.page;
+  const recent = pageData.items;
+  els.usageRecentEmpty.hidden = recent.length > 0;
+  els.usageRecentCount.textContent = records.length ? `第 ${pageData.start}-${pageData.end} 条 / 共 ${records.length} 条记录` : "0 条记录";
+  if (!recent.length) {
+    els.usageRecent.innerHTML = "";
+    els.usageRecentEmpty.textContent = records.length ? "当前页没有请求记录。" : (allUsageFiltersEmpty() ? "暂无请求记录。" : "没有符合当前筛选条件的请求。");
+    renderUsagePagination(els.usageRecentPagination, 1, 0, 0, "usageRecentPage");
+    return;
+  }
+  els.usageRecent.innerHTML = `<div class="usage-recent-head" role="row"><span>会话</span><span>Input</span><span>Output</span><span>Cache hit</span><span>时间</span></div>${recent.map((record) => {
+    const cacheRate = ratio(record.cachedInputTokens || 0, record.inputTokens || 0);
+    return `<div class="usage-recent-row" role="row"><div class="usage-recent-session"><strong>${escapeHtml(record.session.title)}</strong><small>${escapeHtml(accountDisplayName(record.session.accountId))}</small></div><span class="usage-recent-number">${formatExactTokenCount(record.inputTokens || 0)}</span><span class="usage-recent-number">${formatExactTokenCount(record.outputTokens || 0)}</span><span class="usage-recent-cache">${record.inputTokens ? formatPercent(cacheRate) : "--"}</span><span class="usage-recent-number">${escapeHtml(relativeTime(record.at))}</span></div>`;
+  }).join("")}`;
+  renderUsagePagination(els.usageRecentPagination, pageData.page, pageData.pageCount, pageData.total, "usageRecentPage");
+}
+
+function paginateUsageItems(items, page, pageSize) {
+  const total = items.length;
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  const currentPage = Math.min(Math.max(1, Number(page) || 1), pageCount);
+  const startIndex = total ? (currentPage - 1) * pageSize : 0;
+  return {
+    items: items.slice(startIndex, startIndex + pageSize),
+    page: currentPage,
+    pageCount: total ? pageCount : 0,
+    total,
+    start: total ? startIndex + 1 : 0,
+    end: Math.min(startIndex + pageSize, total)
+  };
+}
+
+function renderUsagePagination(container, page, pageCount, total, target) {
+  if (!total || pageCount <= 1) {
+    container.innerHTML = "";
+    return;
+  }
+  container.innerHTML = `<button class="icon-button usage-page-button" type="button" data-usage-page="${page - 1}" aria-label="上一页" ${page <= 1 ? "disabled" : ""}><i data-lucide="chevron-left"></i></button><span class="usage-page-status">第 <strong>${page}</strong> / ${pageCount} 页 <small>共 ${total} 条</small></span><button class="icon-button usage-page-button" type="button" data-usage-page="${page + 1}" aria-label="下一页" ${page >= pageCount ? "disabled" : ""}><i data-lucide="chevron-right"></i></button>`;
+  container.dataset.target = target;
+  drawIcons();
+}
+
+function allUsageFiltersEmpty() {
+  return !state.usageAccountFilter && !state.usageSessionFilter;
+}
+
+function ratio(numerator, denominator) {
+  const top = Number(numerator) || 0;
+  const bottom = Number(denominator) || 0;
+  return bottom > 0 ? Math.max(0, Math.min(1, top / bottom)) : 0;
+}
+
+function formatPercent(value) {
+  return `${(Math.max(0, Math.min(1, Number(value) || 0)) * 100).toFixed(1)}%`;
+}
+
+function formatTrendDate(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return "--";
+  return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit" }).format(date);
 }
 
 function formatTokenCount(value) {

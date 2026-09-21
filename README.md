@@ -1,4 +1,4 @@
-<h1 align="center">codex-weixin</h1>
+# codex-weixin
 
 <p align="center">
   <img src="src/web/favicon.svg" alt="codex-weixin logo" width="128" height="128" />
@@ -9,80 +9,35 @@
 </p>
 
 <p align="center">
-  <strong>把个人微信账号接入本机 OpenAI Codex。</strong>
+  <strong>把个人微信账号接入本机 OpenAI Codex，并用 Web 控制台管理账号、会话和 Token 用量。</strong>
 </p>
-
-`codex-weixin` 是一个跨平台、本机运行的微信到 Codex 专用服务。启动后会打开 Web 管理页；用户在页面扫码登录微信，即可从微信私聊控制本机 Codex、管理工作目录和切换会话。
 
 ```text
-微信账号 <-> codex-weixin <-> 本机 Codex <-> 允许的工作目录
+微信私聊 <-> codex-weixin <-> 本机 Codex CLI <-> 允许的工作目录
 ```
 
-它不是通用消息网关，不接入其他聊天平台，也不把管理页面开放到局域网或公网。
+`codex-weixin` 是一个在本机运行的微信到 Codex 桥接服务。服务提供扫码登录、微信消息接入、受管 Codex 会话和本地 Web 管理页。Web 服务默认只监听 `127.0.0.1`，不会把管理页面开放到局域网或公网。
 
-## 核心功能
+## 当前能力
 
-### 1. 微信多媒体输入与文件回传
+- 扫码接入一个或多个微信账号；每个账号拥有独立的联系人授权、附件和会话运行状态。
+- 接收微信文本、图片、音频、视频和文件；单个入站附件最大 `100 MiB`。
+- 通过 Codex actions 把本机图片、视频和文件作为微信原生消息发回。
+- 在 Web 中新建、重命名、切换、重置和删除会话；Web 与微信继续使用同一个受管 Codex thread。
+- 在 Web 或微信中切换模型、推理强度和流式回复；支持 `app-server`、`exec` 和自动选择后端。
+- 长任务显示过程进度；可以用 `/stop` 中断当前任务。
+- 提供 Token 统计中控台：KPI、趋势图、输入构成、会话排行、最近请求、筛选和分页。
+- 页面会自动刷新账号、会话和用量状态；配置和历史数据保存在本机状态目录。
 
-微信端可以发送文本、图片、音频、视频和文档给 Codex，单个附件最大 100 MiB。Codex 也可以把本机图片、视频和文件作为微信原生消息发回。
+## 快速开始
 
-<p align="center">
-  <img src="docs/images/screenshots/wechat-media-input-output.png" alt="通过微信向 Codex 发送文件并接收回传" width="420" />
-</p>
-
-### 2. 微信原生语音指令
-
-支持微信语音转写，可以直接用语音向 Codex 下达任务；没有转写文本的语音会作为本机附件交给 Codex 处理。
-
-<p align="center">
-  <img src="docs/images/screenshots/wechat-voice-command.png" alt="通过微信语音向 Codex 下达指令" width="420" />
-</p>
-
-### 3. Codex CLI 原生命令
-
-微信端支持 `/status`、`/new`、`/resume`、`/bind`、`/model`、`/effort`、`/stream`、`/prompt start`、`/prompt done` 和 `/stop`，可以管理会话、工作目录、模型、推理强度和过程进度。
-
-<p align="center">
-  <img src="docs/images/screenshots/wechat-cli-commands.png" alt="在微信中使用 Codex CLI 原生命令" width="420" />
-</p>
-
-### 4. 过程进度反馈
-
-过程进度默认开启。Codex 处理长任务时会持续向微信发送中间进度，Web 端则折叠显示处理过程和用时，最终答案保持完整。
-
-<p align="center">
-  <img src="docs/images/screenshots/wechat-process-progress.png" alt="Codex 长任务的微信过程进度反馈" width="420" />
-</p>
-
-### 5. 多微信账号接入与管理
-
-一个服务可以并行运行多个微信账号。每个账号拥有独立的联系人授权、附件、会话和运行状态；移除账号时还可以选择保留历史，重新扫码后继续使用。
-
-<p align="center">
-  <img src="docs/images/screenshots/web-multi-account.png" alt="codex-weixin 多微信账号管理" width="100%" />
-</p>
-
-### 6. Web 会话管理
-
-Web 端可以按微信账号查看 Markdown 历史、继续同一个 Codex thread，并支持新建、重命名、切换、重置和删除会话。页面也支持直接发送文本和附件，每次最多 10 个文件、合计 100 MiB。
-
-<p align="center">
-  <img src="docs/images/screenshots/web-session-management.png" alt="codex-weixin Web 会话管理" width="100%" />
-</p>
-
-### 7. Web 全局设置与自动更新
-
-Web 端可以配置工作目录、Codex 后端、模型、推理强度和过程进度，也可以检查并安装新版本。全局 npm 安装会更新当前实际运行的 runtime，完成校验后自动重启并恢复连接。
-
-<p align="center">
-  <img src="docs/images/screenshots/web-global-settings.png" alt="codex-weixin Web 全局设置" width="100%" />
-</p>
-
-## 环境要求
+### 环境要求
 
 - Node.js `>=22`
-- Git
-- 已安装并登录 Codex CLI
+- Git（源码开发时需要）
+- 已安装并登录的 Codex CLI
+
+先确认 Codex CLI 可用：
 
 ```bash
 npm install -g @openai/codex
@@ -90,173 +45,191 @@ codex --version
 codex
 ```
 
-## 安装
-
-推荐从 npm 全局安装：
+### 从 npm 安装
 
 ```bash
 npm install -g codex-weixin
 codex-weixin
 ```
 
-也可以从源码安装：
+服务启动后打开 [http://127.0.0.1:8787](http://127.0.0.1:8787)。也可以设置 `CODEX_WEIXIN_OPEN=0`，手动打开这个地址。
+
+### 从源码运行
 
 ```bash
-git clone https://github.com/XavierJiezou/codex-weixin.git
-cd codex-weixin
+git clone https://github.com/FortuneBush/codex-weixin-robot.git
+cd codex-weixin-robot
 npm install
 npm run build
-npm install -g .
-```
-
-服务会自动打开 [http://127.0.0.1:8787](http://127.0.0.1:8787)。如果不希望全局安装，也可以在项目目录运行：
-
-```bash
 npm start
 ```
 
-## 第一次接入微信
+开发模式会直接运行 TypeScript 服务：
 
-1. 打开管理页，在“设置”中确认 Codex 默认工作目录和允许的工作目录。
-2. 点击“添加微信”，使用微信扫描页面二维码并确认登录。
-3. 在微信中给新接入的账号发送任意消息。
-4. 回到“微信账号”，允许页面中出现的待授权联系人。
-5. 再次从微信发送消息，Codex 会在默认工作目录中开始处理。
+```bash
+npm run dev
+```
 
-继续添加账号时重复扫码即可。每个账号都有独立的轮询任务、联系人授权、入站文件和会话状态；单个账号发生错误不会停止其他账号。同一个微信账号因登录过期等原因重新扫码时，会刷新原账号凭据并保留本机备注、授权和会话，不会创建新的空账号。移除账号时可以保留会话历史；登录凭据会立即删除，同一微信用户以后重新扫码时会恢复原备注、授权和受管会话。
+如果修改了 `src/web` 后使用 `npm start`，请先执行 `npm run build`，这样 `dist/web` 才会包含最新页面。
 
-## 会话管理
+## 第一次使用
 
-“会话”页面只管理由本服务创建和使用的 Codex 会话，不扫描或接管其他终端产生的全部 Codex 历史记录。
+1. 启动服务并打开 Web 管理页。
+2. 在“微信账号”页扫码登录；首次登录后等待联系人同步完成。
+3. 在联系人列表中允许需要使用 Codex 的微信联系人。
+4. 在“会话”页创建或选择会话，确认工作目录后即可从 Web 或微信发送任务。
+5. 进入“Token 统计”查看已经完成的 Codex 请求。没有完成过请求时，统计页会显示空状态。
 
-选择一个会话后，右侧会从 Codex 自身保存的 thread 中读取历史用户消息和最终回复。聊天标题下方可以为当前会话选择模型、推理强度和过程进度，或继续继承全局设置；这与微信 `/model`、`/effort`、`/stream` 共用同一份会话配置。过程进度默认开启，在 Web 中折叠展示并记录处理用时，最终答案仍作为一个完整回复显示。可以直接在页面底部继续聊天，并通过回形针按钮将文本提示词和多个文件作为同一个 turn 发送；Web 和微信共用同一个 thread，上下文会保持连续。上传文件按微信账号和会话隔离保存在 `~/.codex-weixin/inbound/`，每次最多 10 个、合计不超过 100 MiB。
+## Web 管理页
 
-页面默认使用账号备注，不把内部 ID 当作账号名称。展开账号卡片中的“账号 ID”可以查看 iLink Bot ID 和 User ID；Codex thread id 仍不在普通页面显示。可以在“微信账号”页面给账号设置只保存在本机的备注；备注会同步用于会话标签。未设置备注时才使用“微信账号 1”这类默认名称。当前扫码和消息接口没有提供微信昵称、头像或个人资料查询能力，因此页面使用默认图标。
+### 微信账号
 
-- 每个已授权微信账号有一个当前活动会话，也可以拥有多个命名会话。
-- “切换”决定该联系人下一条微信消息继续哪个 Codex thread。
-- “重置”清空本服务记录的 thread，下一条消息创建新上下文。
-- “删除”只删除本服务中的会话记录，不删除 Codex 自身保存的历史文件。
-- 微信中的 `/new` 会立即为当前联系人创建新的受管会话。
-- 微信中的 `/resume` 会按最近更新时间列出当前联系人的历史会话、最近内容摘要和时间，并为每项生成 `R1`、`R2` 这类独立切换编号；发送 `/resume R1` 可切换并继续原来的 Codex thread，不会与“会话 6”这类名称混淆。
+账号页显示扫码状态、联系人授权和账号备注。服务可以同时维护多个账号；账号之间的联系人、会话、附件和运行状态相互隔离。移除账号时可以保留历史，之后重新扫码可以恢复本机保留的账号状态。
 
-## 微信内命令
+### 会话
+
+会话页按微信账号列出受管 Codex threads，支持新建、重命名、激活、重置和删除。页面可以直接发送文本和附件，每次最多 `10` 个文件、合计 `100 MiB`。每个会话还可以单独覆盖模型、推理强度和流式回复设置。
+
+### Token 统计中控台
+
+Token 统计页每 `5` 秒自动刷新。统计来自本机受管会话记录，用于观察当前服务消耗，不是 OpenAI 账单数据。
+
+- 顶部 KPI 显示累计 Token、Input、Output、Cache Hit Rate、请求轮数和平均每轮 Token。
+- 趋势图按日期绘制 Input、Output 和 Cached；页面最多展示最近 `14` 个日期点。
+- 输入构成图区分缓存输入和未缓存输入，便于判断上下文复用情况。
+- “会话消耗排行”使用彩色分段柱：Input 使用绿色、Cached 使用黄色、Output 使用蓝色，并在柱下显示具体数值和缓存命中率。
+- “最近请求”列出每轮的账号、会话、Input、Output、Cached、总量和发生时间。
+- 可以按微信账号和会话筛选，按累计 Token、Input、Output、Cache Hit Rate 或最近使用时间排序。
+- 会话排行和最近请求都支持分页，每页可选 `5`、`10` 或 `20` 条；筛选条件、KPI、图表和列表会同步更新。
+
+统计口径如下：`Input` 是输入上下文 Token，`Output` 是模型生成 Token，`Cached` 是命中的缓存输入 Token，`Cache Hit Rate = Cached / Input`。没有 Input 时命中率显示为 `--`。每个受管会话最多保留最近 `1000` 条 Token 记录。
+
+### 设置
+
+设置页用于维护默认工作目录、允许的工作区、Codex 后端、exec sandbox、默认模型、推理强度和流式回复。也可以查看运行信息、检查版本并执行更新。默认配置适合本机使用；改变 sandbox 权限前请确认 Codex 需要访问的文件范围。
+
+## 微信命令
+
+在已授权的微信联系人中发送以下命令：
 
 ```text
-/help                         查看命令
-/status                       查看当前会话、工作目录、thread、backend、实际模型和推理强度
-/bind <absolute-path>          绑定到允许列表内的工作目录
+/help                         显示命令
+/status                       查看当前绑定、模型和推理强度
+/bind <absolute-path>         把当前聊天绑定到工作目录
 /new                          创建新的受管 Codex 会话
-/resume                       查看历史会话、最近内容摘要和序号
-/resume R<编号>               按 R 切换编号继续指定的历史会话
-/model                        查看当前模型和可用模型
-/model <序号|模型 ID|default>  切换当前会话模型，或恢复继承设置
-/effort                       查看当前模型支持的推理强度
-/effort <序号|强度|default>    切换当前会话推理强度，或恢复继承设置
-/stream                       查看当前会话的过程进度设置
-/stream <on|off|default>       开启、关闭过程进度，或恢复继承全局设置
+/resume [R-number]            列出或切换历史会话
+/model [number|model-id|default]  查看或切换模型
+/effort [number|level|default]   查看或切换推理强度
+/stream [on|off|default]      查看或切换流式回复
 /prompt start                 开始缓冲多条微信消息
-/prompt done                  将缓冲内容作为一次 Codex turn 提交
+/prompt done                  提交已缓冲的消息
 /stop                         中断当前 Codex 任务
 ```
 
-普通消息直接进入当前活动会话。图片、文件、视频和无转写语音会先保存到账号独立的入站目录，再以本地路径加入 prompt；有微信转写文本的语音优先使用转写文本。
+`/model`、`/effort` 和 `/stream` 的修改只作用于当前受管会话；使用 `default` 可以恢复继承 Web/Codex 全局设置。`/bind` 只能选择设置页允许的绝对工作目录。
 
-## 文件回传
+## 从 Codex 发送微信媒体
 
-Codex 可以在最终回复中声明需要发送的本机文件：
+Codex 可以在回复中输出 `codex-weixin-actions` JSON 代码块，把本机文件发送回当前微信联系人。路径必须是绝对路径，并且位于允许的工作区内：
 
-````text
+````markdown
 ```codex-weixin-actions
-{
-  "send": [
-    { "type": "image", "path": "/absolute/path/chart.png" },
-    { "type": "video", "path": "/absolute/path/demo.mp4" },
-    { "type": "file", "path": "/absolute/path/report.pdf" }
-  ]
-}
+{"actions":[
+  {"type":"send","mediaType":"image","path":"C:/work/chart.png","caption":"分析图"},
+  {"type":"send","mediaType":"file","path":"C:/work/report.pdf"}
+]}
 ```
 ````
 
-只接受本机绝对路径。原生出站类型为 `image`、`video` 和 `file`；音频按普通文件发送。远程 URL 不会被当作本机文件上传。
+支持的 `mediaType` 为 `image`、`video` 和 `file`。服务会校验路径、文件类型和大小，不能把任意本机路径直接暴露给微信。
 
-## Codex 后端
+## 配置
 
-默认的 `codexBackend` 是 `auto`。第一次收到 Codex 消息时，服务会启动一个持久的 `codex app-server --stdio` 进程，并使用新版 `initialize`、`thread/*` 和 `turn/*` 协议。新会话和已有会话都优先通过 app-server 运行；如果 app-server 无法启动、握手或处理请求，会自动回退到 `codex exec` 或 `codex exec resume`。
+Web 设置页会把配置写入状态目录中的 `config.json`。主要字段如下：
 
-微信端目前没有 Codex 审批弹窗，因此 app-server 使用 `approvalPolicy: "never"`，只在现有 Codex sandbox 权限内执行，不会等待一个无法在微信中回答的本机审批请求。管理页仍可把后端固定为 `app-server` 或 `exec`，用于排查问题。
+| 配置项 | 作用 |
+| --- | --- |
+| `defaultCwd` | 默认 Codex 工作目录 |
+| `allowedWorkspaces` | `/bind` 和会话可使用的绝对工作目录列表 |
+| `codexBin` | Codex CLI 可执行文件，默认 `codex` |
+| `codexBackend` | `auto`、`app-server` 或 `exec` |
+| `codexExecSandbox` | `read-only`、`workspace-write` 或 `danger-full-access` |
+| `codexTimeoutMs` | Codex 单次任务超时；留空表示不限制，范围为 1 分钟至 24 小时 |
+| `model` / `effort` | 默认模型和推理强度，留空表示沿用 Codex 设置 |
+| `streamReplies` | 是否向微信发送过程进度 |
+| `allowedSenderIds` | 允许使用服务的微信联系人 ID |
+| `maxBufferItems` / `promptBufferTtlMs` | 消息缓冲数量和过期时间 |
+| `maxInboundBytes` | 入站附件大小上限，默认 `100 MiB` |
 
-## 模型和推理强度
-
-“设置”页面会从 Codex app-server 读取可用模型和各模型支持的推理强度。选择“沿用 Codex 设置”时使用 Codex 自身配置；选择具体模型或推理强度并保存后，后续 Web 和微信消息都会使用该配置。
-
-微信中发送 `/model` 或 `/effort` 可以查看带序号的选项，再用序号或英文 ID 切换。微信端设置只覆盖当前受管会话，不影响其他微信账号、联系人或会话；发送 `/model default`、`/effort default` 可恢复继承 Web/Codex 设置。Web 继续该会话时也会沿用这份会话设置。
-
-IkunCoding 提供方会额外显示 `gpt-5.6-sol`、`gpt-5.6-terra` 和 `gpt-5.6-luna`。切换到其他模型后，这三项仍会保留在下拉列表和微信 `/model` 列表中。微信发送 `/status` 可以查看当前生效的模型和推理强度。
-
-## 本地数据
-
-服务状态和默认 Codex 工作目录统一放在：
-
-```text
-~/.codex-weixin/
-  accounts/                 微信账号凭据，每个账号一个文件
-  retained-accounts.json    已移除账号的恢复索引，不包含 token
-  runtime/<account-id>/     联系人授权和受管会话状态
-  inbound/<account-id>/     微信入站附件
-  config.json               Codex 和工作区配置
-  logs/
-```
-
-不要提交或分享该目录。管理 API 不会把微信 token 返回给浏览器。
-
-## 启动设置
-
-服务始终只绑定 `127.0.0.1`。可以通过环境变量改变端口、状态目录或关闭自动打开浏览器：
+### 环境变量
 
 ```text
 CODEX_WEIXIN_PORT=8787
-CODEX_WEIXIN_STATE_DIR=/absolute/private/path
+CODEX_WEIXIN_STATE_DIR=~/.codex-weixin
 CODEX_WEIXIN_OPEN=0
 ```
 
 Windows PowerShell 示例：
 
 ```powershell
+$env:CODEX_WEIXIN_PORT="8787"
 $env:CODEX_WEIXIN_OPEN="0"
 codex-weixin
 ```
 
+## 本地数据
+
+默认状态目录为 `~/.codex-weixin/`：
+
+```text
+~/.codex-weixin/
+  accounts/                 微信账号凭据
+  retained-accounts.json    已移除账号的恢复索引
+  config.json               Web 设置和 Codex 配置
+  runtime/<account-id>/     联系人授权、会话和 Token 统计
+  inbound/<account-id>/     微信入站附件
+  logs/<account-id>/        运行日志
+```
+
+Token 用量来自 `runtime` 中的本机记录；服务不会把微信凭据返回给浏览器。不要提交或分享整个状态目录。
+
 ## 安全边界
 
-- Web 服务只监听本机，拒绝非本机 Host 和 Origin。
-- 所有修改 API 都需要页面运行时临时令牌。
-- 微信凭据永远不返回管理页面。
-- 未知联系人默认拒绝，必须在管理页明确允许。
-- `/bind` 只能选择允许列表内的绝对工作目录。
-- `danger-full-access` 会绕过 Codex 文件系统 sandbox；只有接受整机访问风险时才启用。
-- 多账号可以并行触发 Codex，会共同占用本机 CPU、内存和 Codex 配额。
+- Web 服务只监听 `127.0.0.1`，并拒绝非本机 Host 和 Origin。
+- 修改类 API 使用页面运行时令牌；读取接口也只服务于本机管理页。
+- 未知联系人默认拒绝，必须在“微信账号”页明确授权。
+- 所有工作区和媒体路径都会经过允许列表校验。
+- 微信端没有 Codex 审批弹窗，app-server 使用 `approvalPolicy: "never"`；实际文件访问仍受所选 Codex sandbox 约束。
+- `danger-full-access` 会绕过 Codex 文件系统 sandbox，只应在明确接受风险时使用。
+- 多个账号可以并行触发 Codex，会共同占用本机 CPU、内存和 Codex 配额。
 
-## 开发
+## 开发与验证
 
 ```bash
 npm install
-npm run dev
-npm test
-npm run typecheck
-npm run build
+npm run dev       # 开发模式
+npm test          # Node 测试
+npm run typecheck # TypeScript 类型检查
+npm run build     # 构建 dist/server 和 dist/web
+npm start         # 运行构建产物
 ```
 
-开发入口同样只启动本机 Web 服务。浏览器页面、JSON API、多账号运行时、扫码状态机和受管会话都有自动化测试。
+构建入口为 `dist/server/index.js`。提交页面改动前至少执行 `npm run typecheck` 和 `npm run build`；提交前可用 `git diff --check` 检查 Markdown 和代码的空白错误。
 
-源码目录通过 `npm run dev` 或 `npm start` 启动时，Web 只检查新版本，不会自动安装；请通过 Git 更新源码后重新构建。全局安装和独立 `node_modules/codex-weixin` runtime 会更新当前实际运行的 npm prefix，并在重启前验证目标版本和服务入口。Windows 更新前会自动释放服务进程对包目录的工作目录占用，避免 npm 因 `EBUSY` 无法替换文件。
+## 截图
 
-## 参考与许可
+仓库中的界面截图位于 [`docs/images/screenshots`](./docs/images/screenshots/)：
 
-项目是独立实现，微信 iLink 接入形态参考 `Tencent/openclaw-weixin`，并参考了公开的 Codex/微信桥接项目在 Codex app-server、媒体传输和安全边界方面的实践。项目未复制 AGPL 项目源码，使用 MIT License。
+- [微信多媒体输入与回传](./docs/images/screenshots/wechat-media-input-output.png)
+- [微信语音指令](./docs/images/screenshots/wechat-voice-command.png)
+- [微信命令](./docs/images/screenshots/wechat-cli-commands.png)
+- [微信过程进度](./docs/images/screenshots/wechat-process-progress.png)
+- [Web 多账号](./docs/images/screenshots/web-multi-account.png)
+- [Web 会话管理](./docs/images/screenshots/web-session-management.png)
+- [Web 全局设置](./docs/images/screenshots/web-global-settings.png)
 
-版本变更见 [CHANGELOG.md](./CHANGELOG.md)。
+Token 统计页当前以动态数据为主，README 用文字说明其交互和统计口径，避免引用固定的旧截图。
 
-## 社区
+## 许可
 
-感谢 [LINUX DO](https://linux.do/t/topic/2599273) 社区佬友的支持与反馈。
+本项目使用 [MIT License](./LICENSE)。版本变更见 [CHANGELOG.md](./CHANGELOG.md)。

@@ -141,28 +141,74 @@
     </section>
 
     <section class="view usage-view" id="usageView" data-view-panel="usage" hidden>
-      <div class="section-heading">
+      <div class="usage-hero">
         <div>
-          <p class="eyebrow">TOKEN USAGE</p>
+          <p class="eyebrow">TOKEN CONTROL CENTER</p>
           <h1>Token 统计</h1>
+          <p class="usage-hero-copy">实时观察输入、输出与缓存效率，快速定位高消耗会话。</p>
         </div>
-        <button class="icon-button" id="refreshUsageButton" type="button" title="刷新 Token 统计" aria-label="刷新 Token 统计">
-          <i data-lucide="refresh-cw"></i>
-        </button>
+        <div class="usage-hero-actions">
+          <span class="usage-live"><i></i>自动刷新 · 5 秒</span>
+          <button class="icon-button" id="refreshUsageButton" type="button" title="刷新 Token 统计" aria-label="刷新 Token 统计">
+            <i data-lucide="refresh-cw"></i>
+          </button>
+        </div>
       </div>
-      <div class="usage-summary" aria-label="Token 总量概览">
-        <article class="usage-stat"><span>累计 Token</span><strong id="usageTotal">0</strong><small>输入 + 输出</small></article>
-        <article class="usage-stat"><span>输入 Token</span><strong id="usageInput">0</strong><small>包含缓存输入</small></article>
-        <article class="usage-stat"><span>输出 Token</span><strong id="usageOutput">0</strong><small>模型生成内容</small></article>
-        <article class="usage-stat"><span>请求轮数</span><strong id="usageTurns">0</strong><small>已完成的 Codex 请求</small></article>
+
+      <div class="usage-summary usage-kpi-grid" aria-label="Token 总量概览">
+        <article class="usage-stat usage-kpi usage-kpi-total"><div class="usage-kpi-label"><span>累计 Token</span><i data-lucide="layers-3"></i></div><strong id="usageTotal">0</strong><small>输入 + 输出</small></article>
+        <article class="usage-stat usage-kpi usage-kpi-input"><div class="usage-kpi-label"><span>Input Token</span><i data-lucide="arrow-down-to-line"></i></div><strong id="usageInput">0</strong><small>上下文与提示词</small></article>
+        <article class="usage-stat usage-kpi usage-kpi-output"><div class="usage-kpi-label"><span>Output Token</span><i data-lucide="arrow-up-from-line"></i></div><strong id="usageOutput">0</strong><small>模型生成内容</small></article>
+        <article class="usage-stat usage-kpi usage-kpi-cache"><div class="usage-kpi-label"><span>Cache Hit Rate</span><i data-lucide="zap"></i></div><strong id="usageCacheRate">--</strong><small id="usageCacheDetail">缓存输入 / 输入 Token</small></article>
+        <article class="usage-stat usage-kpi usage-kpi-turns"><div class="usage-kpi-label"><span>请求轮数</span><i data-lucide="repeat-2"></i></div><strong id="usageTurns">0</strong><small id="usageAvgTurn">平均每轮 0 Token</small></article>
       </div>
-      <section class="usage-panel" aria-labelledby="usageChartTitle">
+
+      <section class="usage-filter-bar" aria-label="Token 统计筛选条件">
+        <div class="usage-filter-heading"><i data-lucide="filter"></i><strong>筛选数据</strong><span>选择账号或会话后，指标、趋势、排行和请求明细会同步更新</span></div>
+        <label><span>微信账号</span><select id="usageAccountFilter"><option value="">全部账号</option></select></label>
+        <label><span>会话</span><select id="usageSessionFilter"><option value="">全部会话</option></select></label>
+        <label><span>排序方式</span><select id="usageSortFilter"><option value="total">累计 Token</option><option value="input">Input Token</option><option value="output">Output Token</option><option value="cache">Cache Hit Rate</option><option value="recent">最近使用</option></select></label>
+        <label><span>每页数量</span><select id="usagePageSize"><option value="5">5 条</option><option value="10" selected>10 条</option><option value="20">20 条</option></select></label>
+        <button class="button button-secondary usage-filter-reset" id="usageResetFilters" type="button"><i data-lucide="rotate-ccw"></i><span>重置</span></button>
+      </section>
+
+      <div class="usage-dashboard-grid">
+        <section class="usage-panel usage-trend-panel" aria-labelledby="usageTrendTitle">
+          <div class="usage-panel-heading">
+            <div><p class="eyebrow">REQUEST TREND</p><h2 id="usageTrendTitle">请求 Token 趋势</h2></div>
+            <div class="usage-legend" aria-label="图例"><span><i class="usage-legend-input"></i>Input</span><span><i class="usage-legend-output"></i>Output</span><span><i class="usage-legend-cache"></i>Cache</span></div>
+          </div>
+          <div id="usageTrend" class="usage-trend" role="img" aria-label="按请求时间显示 Input、Output 和 Cache Token 的趋势图"></div>
+          <div id="usageTrendEmpty" class="usage-empty" hidden>暂无趋势数据，完成一次 Codex 请求后会显示。</div>
+        </section>
+        <section class="usage-panel usage-mix-panel" aria-labelledby="usageMixTitle">
+          <div class="usage-panel-heading"><div><p class="eyebrow">INPUT COMPOSITION</p><h2 id="usageMixTitle">输入构成</h2></div></div>
+          <div id="usageMix" class="usage-mix" role="img" aria-label="缓存输入与未缓存输入构成图"></div>
+          <div class="usage-mix-stats" id="usageMixStats"></div>
+        </section>
+      </div>
+
+      <section class="usage-panel usage-session-panel" aria-labelledby="usageChartTitle">
         <div class="usage-panel-heading">
-          <div><p class="eyebrow">SESSION BREAKDOWN</p><h2 id="usageChartTitle">按会话用量</h2></div>
-          <div class="usage-legend" aria-label="图例"><span><i class="usage-legend-input"></i>输入</span><span><i class="usage-legend-output"></i>输出</span></div>
+          <div><p class="eyebrow">SESSION BREAKDOWN</p><h2 id="usageChartTitle">会话消耗排行</h2></div>
+          <div class="usage-session-heading-meta">
+            <div class="usage-session-legend" aria-label="会话柱状图图例"><span><i class="usage-legend-input"></i>Input</span><span><i class="usage-legend-cache"></i>Cached</span><span><i class="usage-legend-output"></i>Output</span></div>
+            <span class="usage-panel-note" id="usageSortNote">按累计 Token 排序</span>
+          </div>
         </div>
-        <div id="usageChart" class="usage-chart" role="img" aria-label="按会话显示输入和输出 Token 的水平条形图"></div>
+        <div id="usageChart" class="usage-chart" role="img" aria-label="按会话显示输入、输出和缓存 Token 的水平条形图"></div>
         <div id="usageEmpty" class="usage-empty" hidden>暂无 Token 使用记录，完成一次 Codex 请求后会显示统计数据。</div>
+        <div class="usage-pagination" id="usageSessionPagination" role="navigation" aria-label="会话排行分页"></div>
+      </section>
+
+      <section class="usage-panel usage-recent-panel" aria-labelledby="usageRecentTitle">
+        <div class="usage-panel-heading">
+          <div><p class="eyebrow">RECENT REQUESTS</p><h2 id="usageRecentTitle">最近请求</h2></div>
+          <span class="usage-panel-note" id="usageRecentCount">0 条记录</span>
+        </div>
+        <div id="usageRecent" class="usage-recent" role="table" aria-label="最近 Token 请求明细"></div>
+        <div id="usageRecentEmpty" class="usage-empty" hidden>暂无请求记录。</div>
+        <div class="usage-pagination" id="usageRecentPagination" role="navigation" aria-label="最近请求分页"></div>
       </section>
     </section>
 

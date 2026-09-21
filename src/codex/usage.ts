@@ -11,8 +11,14 @@ export function parseCodexTokenUsage(value: unknown): CodexTokenUsage | undefine
   const raw = value as Record<string, unknown>;
   const inputTokens = nonNegativeInteger(raw.input_tokens ?? raw.inputTokens ?? raw.prompt_tokens ?? raw.promptTokens);
   const outputTokens = nonNegativeInteger(raw.output_tokens ?? raw.outputTokens ?? raw.completion_tokens ?? raw.completionTokens);
+  const inputTokenDetails = asRecord(raw.input_token_details ?? raw.inputTokenDetails);
   const cachedInputTokens = nonNegativeInteger(
-    raw.cached_input_tokens ?? raw.cachedInputTokens ?? raw.cache_read_input_tokens ?? raw.cached_tokens
+    raw.cached_input_tokens
+      ?? raw.cachedInputTokens
+      ?? raw.cache_read_input_tokens
+      ?? raw.cached_tokens
+      ?? inputTokenDetails?.cached_tokens
+      ?? inputTokenDetails?.cachedTokens
   );
   const reportedTotal = nonNegativeInteger(raw.total_tokens ?? raw.totalTokens);
   if (inputTokens === undefined && outputTokens === undefined && reportedTotal === undefined) {
@@ -31,4 +37,8 @@ export function parseCodexTokenUsage(value: unknown): CodexTokenUsage | undefine
 function nonNegativeInteger(value: unknown): number | undefined {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return undefined;
   return Math.floor(value);
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" ? value as Record<string, unknown> : undefined;
 }
