@@ -40,6 +40,7 @@ class ProgressNotifier {
   private timerDueAt = 0;
   private heartbeatTimer?: NodeJS.Timeout;
   private sendChain = Promise.resolve();
+  private sending = false;
   private lastSentAt = 0;
   private lastSentText?: string;
   private lastEventAt = Date.now();
@@ -79,8 +80,10 @@ class ProgressNotifier {
     // A heartbeat queued at the exact moment a turn completes is stale; the
     // final answer is the useful update in that case.
     if (this.pending?.heartbeat) this.pending = undefined;
-    this.flushPending();
-    await this.sendChain;
+    while (this.pending) {
+      this.flushPending();
+      await this.sendChain;
+    }
   }
 
   async close(): Promise<void> {
@@ -91,12 +94,14 @@ class ProgressNotifier {
     this.timerDueAt = 0;
     this.heartbeatTimer = undefined;
     if (this.pending?.heartbeat) this.pending = undefined;
-    this.flushPending();
-    await this.sendChain;
+    while (this.pending) {
+      this.flushPending();
+      await this.sendChain;
+    }
   }
 
   private schedule(): void {
-    if (this.timer || !this.pending || this.closed) return;
+    if (this.timer || !this.pending || this.closed || this.sending) return;
     const interval = this.pending.important
       ? PROGRESS_IMPORTANT_INTERVAL_MS
       : this.intervalMs;
@@ -109,12 +114,12 @@ class ProgressNotifier {
       this.timer = undefined;
       this.timerDueAt = 0;
       this.flushPending();
-      this.schedule();
+      if (!this.sending) this.schedule();
     }, delay);
   }
 
   private rescheduleIfNeeded(): void {
-    if (!this.pending || !this.timer || this.closed) return;
+    if (!this.pending || !this.timer || this.closed || this.sending) return;
     const interval = this.pending.important
       ? PROGRESS_IMPORTANT_INTERVAL_MS
       : this.intervalMs;
@@ -135,10 +140,15 @@ class ProgressNotifier {
     const text = pending.text;
     this.lastSentAt = Date.now();
     this.lastSentText = text;
+    this.sending = true;
     this.sendChain = this.sendChain
       .then(() => this.send(text))
       .catch((error) => {
         console.warn(`WeChat progress reply failed: ${error instanceof Error ? error.message : String(error)}`);
+      })
+      .then(() => {
+        this.sending = false;
+        this.schedule();
       });
   }
 }
