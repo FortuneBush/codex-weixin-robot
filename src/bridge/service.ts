@@ -26,8 +26,7 @@ export type BridgeServiceOptions = {
 
 const PROGRESS_SEND_INTERVAL_MS = 4_000;
 const PROGRESS_IMPORTANT_INTERVAL_MS = 2_000;
-const PROGRESS_HEARTBEAT_INTERVAL_MS = 20_000;
-const PROGRESS_ACK_DELAY_MS = 600;
+const PROGRESS_HEARTBEAT_INTERVAL_MS = 60_000;
 
 /**
  * Coalesces fast Codex progress events before sending them to WeChat.
@@ -530,16 +529,8 @@ export class BridgeService {
     const progressNotifier = progressEnabled
       ? new ProgressNotifier((progress) => this.reply(message.senderId, `【进度】${progress}`))
       : undefined;
-    let acknowledgementTimer: NodeJS.Timeout | undefined;
     this.options.onTurnStatus?.({ senderId: message.senderId, sessionId: session.id, active: true });
     try {
-      if (progressNotifier) {
-        // Most turns produce a Codex commentary event quickly. If they do not,
-        // still acknowledge the message within a fraction of a second.
-        acknowledgementTimer = setTimeout(() => {
-          progressNotifier.push("已收到，正在处理…");
-        }, PROGRESS_ACK_DELAY_MS);
-      }
       await this.withTyping(message.senderId, async () => {
         console.log(`[codex-weixin] starting Codex turn for ${message.senderId} in ${workspace}`);
         const result = await this.runner.run({
@@ -553,10 +544,6 @@ export class BridgeService {
               const progressText = progress.trim();
               if (!progressText || sentProgress.has(progressText)) return;
               sentProgress.add(progressText);
-              if (acknowledgementTimer) {
-                clearTimeout(acknowledgementTimer);
-                acknowledgementTimer = undefined;
-              }
               progressNotifier?.push(progressText);
             }
           } : {})
@@ -579,7 +566,6 @@ export class BridgeService {
         }
       });
     } finally {
-      if (acknowledgementTimer) clearTimeout(acknowledgementTimer);
       await progressNotifier?.close();
       this.options.onTurnStatus?.({ senderId: message.senderId, sessionId: session.id, active: false });
     }
