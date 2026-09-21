@@ -6,6 +6,7 @@ const rl = readline.createInterface({ input: process.stdin });
 let initialized = false;
 let nextTurn = 1;
 const activeTurns = new Map();
+const loadedThreads = new Set();
 
 function send(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -17,6 +18,10 @@ function respond(id, result) {
 
 function fail(id, message) {
   send({ id, error: { code: -32602, message } });
+}
+
+function failWithCode(id, code, message) {
+  send({ id, error: { code, message } });
 }
 
 function completedTurn(id, status, error = null) {
@@ -73,15 +78,21 @@ rl.on("line", (line) => {
       model: message.params.model ?? "configured-model",
       reasoningEffort: "high"
     });
+    loadedThreads.add("thread-new");
     return;
   }
 
   if (message.method === "thread/resume") {
+    if (message.params.threadId === "thread-stale") {
+      failWithCode(message.id, -32600, "no rollout found for thread id thread-stale");
+      return;
+    }
     respond(message.id, {
       thread: { id: message.params.threadId },
       model: "resumed-model",
       reasoningEffort: "medium"
     });
+    loadedThreads.add(message.params.threadId);
     return;
   }
 
@@ -123,6 +134,10 @@ rl.on("line", (line) => {
   }
 
   if (message.method === "thread/read") {
+    if (!loadedThreads.has(message.params.threadId)) {
+      failWithCode(message.id, -32600, `thread not loaded: ${message.params.threadId}`);
+      return;
+    }
     respond(message.id, {
       thread: {
         id: message.params.threadId,

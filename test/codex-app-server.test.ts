@@ -86,6 +86,13 @@ test("uses the Codex V2 initialize, thread, and turn lifecycle", async (t) => {
     }
   ]);
 
+  const freshRunner = new AppServerCodexRunner({
+    codexBin: path.join(fixturesDir, "fake-codex-app-server.mjs"),
+    requestTimeoutMs: 2_000
+  });
+  t.after(() => freshRunner.close());
+  assert.equal((await freshRunner.getHistory("thread-existing"))[0].text, "hello history");
+
   assert.deepEqual(await runner.getRuntimeInfo("/tmp/another-project"), {
     model: "configured-model",
     effort: "high",
@@ -102,6 +109,25 @@ test("uses the Codex V2 initialize, thread, and turn lifecycle", async (t) => {
       { effort: "high", description: "Deeper reasoning" }
     ]
   }]);
+});
+
+test("starts a new context when a saved thread rollout is unavailable", async (t) => {
+  const runner = new HybridCodexRunner({
+    backend: "app-server",
+    codexBin: path.join(fixturesDir, "fake-codex-app-server.mjs"),
+    timeoutMs: 2_000
+  });
+  t.after(() => runner.close());
+
+  const result = await runner.run({
+    prompt: "recover",
+    cwd: "/tmp/project",
+    threadId: "thread-stale"
+  });
+
+  assert.equal(result.threadId, "thread-new");
+  assert.match(result.text, /previous Codex context was unavailable/i);
+  assert.match(result.text, /reply:recover/);
 });
 
 test("interrupts the active V2 turn with both threadId and turnId", async (t) => {

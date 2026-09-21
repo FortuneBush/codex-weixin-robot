@@ -170,7 +170,16 @@ export class AppServerCodexRunner {
 
   async getHistory(threadId: string): Promise<CodexHistoryMessage[]> {
     await this.ensureConnected();
-    const response = await this.request("thread/read", { threadId, includeTurns: true }) as Record<string, unknown>;
+    let response: Record<string, unknown>;
+    try {
+      response = await this.request("thread/read", { threadId, includeTurns: true }) as Record<string, unknown>;
+    } catch (error) {
+      if (!isThreadNotLoadedError(error)) {
+        throw error;
+      }
+      await this.request("thread/resume", { threadId });
+      response = await this.request("thread/read", { threadId, includeTurns: true }) as Record<string, unknown>;
+    }
     const thread = response.thread as Record<string, unknown> | undefined;
     return parseThreadHistory(thread);
   }
@@ -629,6 +638,16 @@ export class AppServerCodexRunner {
     this.runtimeInfoByThread.clear();
     this.modelOptions = undefined;
   }
+}
+
+export function isUnavailableCodexThreadError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /(?:no rollout found for thread id|thread not loaded|thread\/resume failed \(-32600\)|thread\/read failed \(-32600\))/i.test(message);
+}
+
+function isThreadNotLoadedError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /thread not loaded|thread\/read failed \(-32600\)/i.test(message);
 }
 
 function turnKeyFromParams(params: Record<string, unknown>): string | undefined {

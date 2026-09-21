@@ -8,7 +8,7 @@ import type { PromptBufferItem } from "../bridge/prompt-buffer.js";
 import { BridgeService } from "../bridge/service.js";
 import { userFacingMessageHandlingError } from "../bridge/errors.js";
 import type { CodexHistoryMessage, CodexModelOption, CodexRuntimeInfo } from "../codex/app-server-runner.js";
-import { HybridCodexRunner } from "../codex/runner.js";
+import { HybridCodexRunner, isUnavailableCodexThreadError } from "../codex/runner.js";
 import { isWorkspaceAllowed, loadConfig, type CodexWeixinConfig } from "../state/config.js";
 import { accountStatePaths, type StatePaths } from "../state/paths.js";
 import { RuntimeStateStore, type ManagedSession, type SessionRuntimeOverrides } from "../state/runtime-state.js";
@@ -354,7 +354,16 @@ export class AccountManager {
     if (!session.threadId) {
       return [];
     }
-    const history = await this.runnerFor().getHistory(session.threadId);
+    let history: CodexHistoryMessage[];
+    try {
+      history = await this.runnerFor().getHistory(session.threadId);
+    } catch (error) {
+      if (!isUnavailableCodexThreadError(error)) {
+        throw error;
+      }
+      store.resetSession(session.id);
+      return [];
+    }
     return history.flatMap((message) => {
       if (message.role === "user") {
         const parsed = parsePrompt(message.text);

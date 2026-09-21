@@ -1,5 +1,6 @@
 import {
   AppServerCodexRunner,
+  isUnavailableCodexThreadError,
   type CodexHistoryMessage,
   type CodexModelOption,
   type CodexRunnerInput,
@@ -7,6 +8,8 @@ import {
 } from "./app-server-runner.js";
 import { CodexExecRunner, type CodexRunResult } from "./exec-runner.js";
 import type { CodexExecSandbox } from "./sandbox.js";
+
+export { isUnavailableCodexThreadError } from "./app-server-runner.js";
 
 export type CodexBackend = "auto" | "app-server" | "exec";
 
@@ -36,11 +39,29 @@ export class HybridCodexRunner {
   async run(input: CodexRunnerInput): Promise<CodexRunResult> {
     const requiresAppServerForStreaming = Boolean(input.onDelta || input.onProgress);
     if (this.options.backend === "exec" && !requiresAppServerForStreaming) {
-      return this.exec.run(input);
+      try {
+        return await this.exec.run(input);
+      } catch (error) {
+        if (!input.threadId || !isUnavailableCodexThreadError(error)) {
+          throw error;
+        }
+        const recovered = await this.exec.run({ ...input, threadId: undefined });
+        return {
+          ...recovered,
+          text: `Warning: the previous Codex context was unavailable after the service restarted; started a new context.\n\n${recovered.text}`
+        };
+      }
     }
     try {
       return await this.appServer.run(input);
     } catch (error) {
+      if (input.threadId && isUnavailableCodexThreadError(error)) {
+        const recovered = await this.appServer.run({ ...input, threadId: undefined });
+        return {
+          ...recovered,
+          text: `Warning: the previous Codex context was unavailable after the service restarted; started a new context.\n\n${recovered.text}`
+        };
+      }
       if (this.options.backend === "app-server") {
         throw error;
       }

@@ -5,7 +5,7 @@ import { parseActionBlocks } from "./actions.js";
 import { buildPrompt, buildPromptPreview, chunkText, parsePrompt } from "./format.js";
 import { PromptBuffer } from "./prompt-buffer.js";
 import type { CodexModelOption, CodexRuntimeInfo } from "../codex/app-server-runner.js";
-import { HybridCodexRunner } from "../codex/runner.js";
+import { HybridCodexRunner, isUnavailableCodexThreadError } from "../codex/runner.js";
 import { isWorkspaceAllowed, type CodexWeixinConfig } from "../state/config.js";
 import { RuntimeStateStore, type ManagedSession } from "../state/runtime-state.js";
 import { WeixinApiClient, isStaleContextError, type FetchLike } from "../weixin/api.js";
@@ -192,6 +192,9 @@ export class BridgeService {
       this.options.stateStore.setSessionPromptPreview(session.id, preview);
       return preview;
     } catch (error) {
+      if (isUnavailableCodexThreadError(error)) {
+        this.options.stateStore.resetSession(session.id);
+      }
       console.warn(`Unable to read Codex history for session ${session.id}: ${error instanceof Error ? error.message : String(error)}`);
       return "历史摘要暂不可用";
     }
