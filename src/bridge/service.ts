@@ -24,8 +24,10 @@ export type BridgeServiceOptions = {
   onTurnStatus?: (status: { senderId: string; sessionId: string; active: boolean }) => void;
 };
 
-const PROGRESS_SEND_INTERVAL_MS = 1_000;
-const PROGRESS_HEARTBEAT_INTERVAL_MS = 15_000;
+const PROGRESS_SEND_INTERVAL_MS = 4_000;
+const PROGRESS_IMPORTANT_INTERVAL_MS = 2_000;
+const PROGRESS_HEARTBEAT_INTERVAL_MS = 20_000;
+const PROGRESS_ACK_DELAY_MS = 600;
 
 /**
  * Coalesces fast Codex progress events before sending them to WeChat.
@@ -33,12 +35,14 @@ const PROGRESS_HEARTBEAT_INTERVAL_MS = 15_000;
  * request cannot hold up the app-server turn or the final answer.
  */
 class ProgressNotifier {
-  private pending?: string;
+  private pending?: { text: string; important: boolean; heartbeat: boolean };
   private timer?: NodeJS.Timeout;
+  private timerDueAt = 0;
   private heartbeatTimer?: NodeJS.Timeout;
   private sendChain = Promise.resolve();
   private lastSentAt = 0;
-  private lastProgressAt = Date.now();
+  private lastSentText?: string;
+  private lastEventAt = Date.now();
   private closed = false;
 
   constructor(
@@ -47,26 +51,34 @@ class ProgressNotifier {
     private readonly heartbeatMs = PROGRESS_HEARTBEAT_INTERVAL_MS
   ) {
     this.heartbeatTimer = setInterval(() => {
-      if (this.closed || Date.now() - this.lastProgressAt < this.heartbeatMs) return;
-      const elapsedSeconds = Math.max(1, Math.round((Date.now() - this.lastProgressAt) / 1_000));
-      this.push(`已持续处理 ${elapsedSeconds} 秒，任务仍在进行中…`);
+      if (this.closed || Date.now() - this.lastEventAt < this.heartbeatMs || this.pending) return;
+      const elapsedSeconds = Math.max(1, Math.round((Date.now() - this.lastEventAt) / 1_000));
+      this.push(`已持续处理 ${elapsedSeconds} 秒，任务仍在进行中…`, { heartbeat: true });
     }, this.heartbeatMs);
   }
 
-  push(text: string): void {
+  push(text: string, options: { important?: boolean; heartbeat?: boolean } = {}): void {
     if (this.closed) return;
-    const normalized = text.trim();
-    if (!normalized || normalized === this.pending) return;
-    this.pending = normalized;
-    this.lastProgressAt = Date.now();
+    const normalized = normalizeProgressText(text);
+    const important = options.important ?? isImportantProgress(normalized);
+    const heartbeat = options.heartbeat === true;
+    if (!normalized || (!heartbeat && !important && !isMeaningfulProgress(normalized, this.lastSentText, this.pending?.text))) return;
+    if (normalized === this.lastSentText || normalized === this.pending?.text) return;
+    if (!heartbeat) this.lastEventAt = Date.now();
+    this.pending = { text: normalized, important, heartbeat };
     this.schedule();
+    this.rescheduleIfNeeded();
   }
 
   async flush(): Promise<void> {
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = undefined;
+      this.timerDueAt = 0;
     }
+    // A heartbeat queued at the exact moment a turn completes is stale; the
+    // final answer is the useful update in that case.
+    if (this.pending?.heartbeat) this.pending = undefined;
     this.flushPending();
     await this.sendChain;
   }
@@ -76,34 +88,77 @@ class ProgressNotifier {
     if (this.timer) clearTimeout(this.timer);
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     this.timer = undefined;
+    this.timerDueAt = 0;
     this.heartbeatTimer = undefined;
+    if (this.pending?.heartbeat) this.pending = undefined;
     this.flushPending();
     await this.sendChain;
   }
 
   private schedule(): void {
     if (this.timer || !this.pending || this.closed) return;
-    const delay = this.lastSentAt === 0
-      ? 0
-      : Math.max(0, this.intervalMs - (Date.now() - this.lastSentAt));
+    const interval = this.pending.important
+      ? PROGRESS_IMPORTANT_INTERVAL_MS
+      : this.intervalMs;
+    const targetAt = this.lastSentAt === 0
+      ? Date.now()
+      : this.lastSentAt + interval;
+    const delay = Math.max(0, targetAt - Date.now());
+    this.timerDueAt = targetAt;
     this.timer = setTimeout(() => {
       this.timer = undefined;
+      this.timerDueAt = 0;
       this.flushPending();
       this.schedule();
     }, delay);
   }
 
+  private rescheduleIfNeeded(): void {
+    if (!this.pending || !this.timer || this.closed) return;
+    const interval = this.pending.important
+      ? PROGRESS_IMPORTANT_INTERVAL_MS
+      : this.intervalMs;
+    const targetAt = this.lastSentAt === 0
+      ? Date.now()
+      : this.lastSentAt + interval;
+    if (this.timerDueAt === targetAt) return;
+    clearTimeout(this.timer);
+    this.timer = undefined;
+    this.timerDueAt = 0;
+    this.schedule();
+  }
+
   private flushPending(): void {
-    const text = this.pending;
+    const pending = this.pending;
     this.pending = undefined;
-    if (!text) return;
+    if (!pending) return;
+    const text = pending.text;
     this.lastSentAt = Date.now();
+    this.lastSentText = text;
     this.sendChain = this.sendChain
       .then(() => this.send(text))
       .catch((error) => {
         console.warn(`WeChat progress reply failed: ${error instanceof Error ? error.message : String(error)}`);
       });
   }
+}
+
+function normalizeProgressText(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function isImportantProgress(text: string): boolean {
+  return /^(?:已收到|正在执行命令|正在修改文件|正在调用|正在搜索|正在协调|失败|错误|中断|已完成)/u.test(text);
+}
+
+function isMeaningfulProgress(text: string, lastSent?: string, pending?: string): boolean {
+  if (text.length < 4) return false;
+  if (text === lastSent || text === pending) return false;
+  if (/[。！？.!?…]$/u.test(text)) return true;
+  if (lastSent && text.startsWith(lastSent) && text.length - lastSent.length < 40) return false;
+  // A complete sentence or a sufficiently large new snapshot is useful to a
+  // human; partial punctuation-only deltas are intentionally held back.
+  return !lastSent || text.length >= 40;
 }
 
 export class BridgeService {
@@ -473,7 +528,7 @@ export class BridgeService {
         // still acknowledge the message within a fraction of a second.
         acknowledgementTimer = setTimeout(() => {
           progressNotifier.push("已收到，正在处理…");
-        }, 350);
+        }, PROGRESS_ACK_DELAY_MS);
       }
       await this.withTyping(message.senderId, async () => {
         console.log(`[codex-weixin] starting Codex turn for ${message.senderId} in ${workspace}`);
