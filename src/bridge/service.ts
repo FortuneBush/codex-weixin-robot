@@ -24,6 +24,88 @@ export type BridgeServiceOptions = {
   onTurnStatus?: (status: { senderId: string; sessionId: string; active: boolean }) => void;
 };
 
+const PROGRESS_SEND_INTERVAL_MS = 1_000;
+const PROGRESS_HEARTBEAT_INTERVAL_MS = 15_000;
+
+/**
+ * Coalesces fast Codex progress events before sending them to WeChat.
+ * The callback from the Codex runner stays synchronous, so a slow WeChat
+ * request cannot hold up the app-server turn or the final answer.
+ */
+class ProgressNotifier {
+  private pending?: string;
+  private timer?: NodeJS.Timeout;
+  private heartbeatTimer?: NodeJS.Timeout;
+  private sendChain = Promise.resolve();
+  private lastSentAt = 0;
+  private lastProgressAt = Date.now();
+  private closed = false;
+
+  constructor(
+    private readonly send: (text: string) => Promise<void>,
+    private readonly intervalMs = PROGRESS_SEND_INTERVAL_MS,
+    private readonly heartbeatMs = PROGRESS_HEARTBEAT_INTERVAL_MS
+  ) {
+    this.heartbeatTimer = setInterval(() => {
+      if (this.closed || Date.now() - this.lastProgressAt < this.heartbeatMs) return;
+      const elapsedSeconds = Math.max(1, Math.round((Date.now() - this.lastProgressAt) / 1_000));
+      this.push(`已持续处理 ${elapsedSeconds} 秒，任务仍在进行中…`);
+    }, this.heartbeatMs);
+  }
+
+  push(text: string): void {
+    if (this.closed) return;
+    const normalized = text.trim();
+    if (!normalized || normalized === this.pending) return;
+    this.pending = normalized;
+    this.lastProgressAt = Date.now();
+    this.schedule();
+  }
+
+  async flush(): Promise<void> {
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = undefined;
+    }
+    this.flushPending();
+    await this.sendChain;
+  }
+
+  async close(): Promise<void> {
+    this.closed = true;
+    if (this.timer) clearTimeout(this.timer);
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    this.timer = undefined;
+    this.heartbeatTimer = undefined;
+    this.flushPending();
+    await this.sendChain;
+  }
+
+  private schedule(): void {
+    if (this.timer || !this.pending || this.closed) return;
+    const delay = this.lastSentAt === 0
+      ? 0
+      : Math.max(0, this.intervalMs - (Date.now() - this.lastSentAt));
+    this.timer = setTimeout(() => {
+      this.timer = undefined;
+      this.flushPending();
+      this.schedule();
+    }, delay);
+  }
+
+  private flushPending(): void {
+    const text = this.pending;
+    this.pending = undefined;
+    if (!text) return;
+    this.lastSentAt = Date.now();
+    this.sendChain = this.sendChain
+      .then(() => this.send(text))
+      .catch((error) => {
+        console.warn(`WeChat progress reply failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+  }
+}
+
 export class BridgeService {
   private readonly access: AccessController;
   private readonly buffers: PromptBuffer;
@@ -380,8 +462,19 @@ export class BridgeService {
     const threadId = this.options.stateStore.getThread(message.senderId) || undefined;
     const progressEnabled = session.streamReplies ?? this.options.config.streamReplies;
     const sentProgress = new Set<string>();
+    const progressNotifier = progressEnabled
+      ? new ProgressNotifier((progress) => this.reply(message.senderId, `【进度】${progress}`))
+      : undefined;
+    let acknowledgementTimer: NodeJS.Timeout | undefined;
     this.options.onTurnStatus?.({ senderId: message.senderId, sessionId: session.id, active: true });
     try {
+      if (progressNotifier) {
+        // Most turns produce a Codex commentary event quickly. If they do not,
+        // still acknowledge the message within a fraction of a second.
+        acknowledgementTimer = setTimeout(() => {
+          progressNotifier.push("已收到，正在处理…");
+        }, 350);
+      }
       await this.withTyping(message.senderId, async () => {
         console.log(`[codex-weixin] starting Codex turn for ${message.senderId} in ${workspace}`);
         const result = await this.runner.run({
@@ -391,15 +484,20 @@ export class BridgeService {
           model: session.model ?? this.options.config.model,
           effort: session.effort ?? this.options.config.effort,
           ...(progressEnabled ? {
-            onProgress: async (progress: string) => {
+            onProgress: (progress: string) => {
               const progressText = progress.trim();
               if (!progressText || sentProgress.has(progressText)) return;
               sentProgress.add(progressText);
-              await this.reply(message.senderId, `【进度】${progressText}`);
+              if (acknowledgementTimer) {
+                clearTimeout(acknowledgementTimer);
+                acknowledgementTimer = undefined;
+              }
+              progressNotifier?.push(progressText);
             }
           } : {})
         });
         console.log(`[codex-weixin] Codex turn completed for ${message.senderId}; text=${result.text.length} chars`);
+        await progressNotifier?.flush();
         if (result.threadId) {
           this.options.stateStore.setThread(message.senderId, result.threadId);
         }
@@ -416,6 +514,8 @@ export class BridgeService {
         }
       });
     } finally {
+      if (acknowledgementTimer) clearTimeout(acknowledgementTimer);
+      await progressNotifier?.close();
       this.options.onTurnStatus?.({ senderId: message.senderId, sessionId: session.id, active: false });
     }
   }
@@ -447,7 +547,9 @@ export class BridgeService {
       }
     };
 
-    await sendTyping(true);
+    // Do not make the first visible progress wait for the typing API. The
+    // indicator is best-effort and can be established while Codex starts.
+    void sendTyping(true);
     const timer = setInterval(() => {
       void sendTyping(true);
     }, 5_000);

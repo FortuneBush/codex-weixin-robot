@@ -111,6 +111,9 @@ export class AppServerCodexRunner {
   private readonly turnStreams = new Map<string, TurnStream>();
   private readonly queuedTurnEvents = new Map<string, QueuedTurnEvent[]>();
   private readonly itemPhasesByTurn = new Map<string, Map<string, string>>();
+  private readonly commentaryBuffers = new Map<string, string>();
+  private readonly commentarySnapshots = new Map<string, string>();
+  private readonly commentaryFlushTimers = new Map<string, NodeJS.Timeout>();
   private readonly tokenUsageByTurn = new Map<string, CodexTokenUsage>();
   private readonly runtimeInfoByThread = new Map<string, CodexRuntimeInfo>();
   private modelOptions?: CodexModelOption[];
@@ -417,6 +420,10 @@ export class AppServerCodexRunner {
         phases.set(itemId, item.phase);
         this.itemPhasesByTurn.set(key, phases);
       }
+      const toolProgress = progressLabelForItem(item?.type);
+      if (key && toolProgress) {
+        this.emitTurnEvent(key, { type: "progress", text: toolProgress });
+      }
       return;
     }
 
@@ -424,7 +431,13 @@ export class AppServerCodexRunner {
       const key = turnKeyFromParams(params);
       const itemId = typeof params.itemId === "string" ? params.itemId : undefined;
       const delta = typeof params.delta === "string" ? params.delta : "";
-      if (!key || !itemId || !delta || this.itemPhasesByTurn.get(key)?.get(itemId) === "commentary") {
+      if (!key || !itemId || !delta) {
+        return;
+      }
+      if (this.itemPhasesByTurn.get(key)?.get(itemId) === "commentary") {
+        const commentaryKey = this.commentaryKey(key, itemId);
+        this.commentaryBuffers.set(commentaryKey, `${this.commentaryBuffers.get(commentaryKey) ?? ""}${delta}`);
+        this.scheduleCommentaryFlush(key, itemId);
         return;
       }
       if (this.turnStreams.has(key)) {
@@ -445,15 +458,13 @@ export class AppServerCodexRunner {
       this.appendTurnEvent(key, raw);
       const item = params.item as Record<string, unknown> | undefined;
       if (item?.type === "agentMessage" && typeof item.text === "string") {
-        if (item.phase === "commentary") {
-          const progress = item.text.trim();
-          if (progress) {
-            if (this.turnStreams.has(key)) {
-              this.enqueueTurnEvent(key, { type: "progress", text: progress });
-            } else {
-              this.queueTurnEvent(key, { type: "progress", text: progress });
-            }
-          }
+        const phase = typeof item.phase === "string"
+          ? item.phase
+          : this.itemPhasesByTurn.get(key)?.get(typeof item.id === "string" ? item.id : "");
+        if (phase === "commentary" && typeof item.id === "string") {
+          const commentaryKey = this.commentaryKey(key, item.id);
+          this.commentaryBuffers.set(commentaryKey, item.text);
+          this.flushCommentary(key, item.id);
         } else {
           this.turnTexts.set(key, item.text);
         }
@@ -471,6 +482,7 @@ export class AppServerCodexRunner {
       return;
     }
     const key = turnKey(threadId, turnId);
+    this.flushCommentaryForTurn(key);
     this.appendTurnEvent(key, raw);
     const status = typeof turn?.status === "string" ? turn.status : "completed";
     const errorValue = turn?.error as Record<string, unknown> | undefined;
@@ -530,6 +542,7 @@ export class AppServerCodexRunner {
     this.turnTexts.delete(key);
     this.queuedTurnEvents.delete(key);
     this.itemPhasesByTurn.delete(key);
+    this.clearCommentaryForTurn(key);
     this.tokenUsageByTurn.delete(key);
     if (completion.status === "completed") {
       resolve({
@@ -570,6 +583,61 @@ export class AppServerCodexRunner {
       .catch((error) => {
         console.warn(`Codex ${event.type} callback failed: ${error instanceof Error ? error.message : String(error)}`);
       });
+  }
+
+  private emitTurnEvent(key: string, event: QueuedTurnEvent): void {
+    if (this.turnStreams.has(key)) {
+      this.enqueueTurnEvent(key, event);
+    } else {
+      this.queueTurnEvent(key, event);
+    }
+  }
+
+  private commentaryKey(key: string, itemId: string): string {
+    return `${key}\u0001${itemId}`;
+  }
+
+  private scheduleCommentaryFlush(key: string, itemId: string): void {
+    const commentaryKey = this.commentaryKey(key, itemId);
+    if (this.commentaryFlushTimers.has(commentaryKey)) return;
+    const timer = setTimeout(() => {
+      this.commentaryFlushTimers.delete(commentaryKey);
+      this.flushCommentary(key, itemId);
+    }, 800);
+    this.commentaryFlushTimers.set(commentaryKey, timer);
+  }
+
+  private flushCommentary(key: string, itemId: string): void {
+    const commentaryKey = this.commentaryKey(key, itemId);
+    const text = (this.commentaryBuffers.get(commentaryKey) ?? "").trim();
+    if (!text || this.commentarySnapshots.get(commentaryKey) === text) return;
+    this.commentarySnapshots.set(commentaryKey, text);
+    const timer = this.commentaryFlushTimers.get(commentaryKey);
+    if (timer) {
+      clearTimeout(timer);
+      this.commentaryFlushTimers.delete(commentaryKey);
+    }
+    this.emitTurnEvent(key, { type: "progress", text });
+  }
+
+  private flushCommentaryForTurn(key: string): void {
+    const prefix = `${key}\u0001`;
+    for (const commentaryKey of this.commentaryBuffers.keys()) {
+      if (!commentaryKey.startsWith(prefix)) continue;
+      this.flushCommentary(key, commentaryKey.slice(prefix.length));
+    }
+  }
+
+  private clearCommentaryForTurn(key: string): void {
+    const prefix = `${key}\u0001`;
+    for (const commentaryKey of this.commentaryBuffers.keys()) {
+      if (!commentaryKey.startsWith(prefix)) continue;
+      const timer = this.commentaryFlushTimers.get(commentaryKey);
+      if (timer) clearTimeout(timer);
+      this.commentaryBuffers.delete(commentaryKey);
+      this.commentarySnapshots.delete(commentaryKey);
+      this.commentaryFlushTimers.delete(commentaryKey);
+    }
   }
 
   private handleServerRequest(message: WireMessage): void {
@@ -645,6 +713,10 @@ export class AppServerCodexRunner {
     this.turnStreams.clear();
     this.queuedTurnEvents.clear();
     this.itemPhasesByTurn.clear();
+    for (const timer of this.commentaryFlushTimers.values()) clearTimeout(timer);
+    this.commentaryBuffers.clear();
+    this.commentarySnapshots.clear();
+    this.commentaryFlushTimers.clear();
     this.runtimeInfoByThread.clear();
     this.modelOptions = undefined;
   }
@@ -736,6 +808,24 @@ function sandboxPolicyFor(sandbox: CodexExecSandbox | undefined): Record<string,
 
 function turnKey(threadId: string, turnId: string): string {
   return `${threadId}\u0000${turnId}`;
+}
+
+function progressLabelForItem(type: unknown): string | undefined {
+  switch (type) {
+    case "commandExecution":
+      return "正在执行命令…";
+    case "fileChange":
+      return "正在修改文件…";
+    case "mcpToolCall":
+      return "正在调用外部工具…";
+    case "webSearch":
+    case "webRun":
+      return "正在搜索资料…";
+    case "collabAgentToolCall":
+      return "正在协调子任务…";
+    default:
+      return undefined;
+  }
 }
 
 function extractAgentMessageFromTurn(turn: Record<string, unknown> | undefined): string {
