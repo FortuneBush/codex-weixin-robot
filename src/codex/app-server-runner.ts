@@ -642,12 +642,12 @@ export class AppServerCodexRunner {
 
 export function isUnavailableCodexThreadError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /(?:no rollout found for thread id|thread not loaded|thread\/resume failed \(-32600\)|thread\/read failed \(-32600\))/i.test(message);
+  return /(?:no rollout found for thread id|thread not loaded|thread not found)/i.test(message);
 }
 
 function isThreadNotLoadedError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /thread not loaded|thread\/read failed \(-32600\)/i.test(message);
+  return /thread not loaded/i.test(message);
 }
 
 function turnKeyFromParams(params: Record<string, unknown>): string | undefined {
