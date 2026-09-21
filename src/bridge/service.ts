@@ -470,7 +470,7 @@ export class BridgeService {
       `workspace: ${workspace}`,
       `thread: ${session?.threadId || "(new)"}`,
       `backend: ${this.options.config.codexBackend}`,
-      `exec sandbox: ${this.options.config.codexExecSandbox ?? "(Codex default)"}`,
+      `sandbox: ${this.options.config.codexExecSandbox ?? "(Codex default)"}`,
       `model: ${runtime.model ?? "(Codex default)"}`,
       `effort: ${runtime.effort ?? "(Codex default)"}`,
       `stream replies: ${(session?.streamReplies ?? this.options.config.streamReplies) ? "on" : "off"}${typeof session?.streamReplies === "boolean" ? " (session)" : " (global)"}`

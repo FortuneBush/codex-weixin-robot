@@ -73,6 +73,14 @@ rl.on("line", (line) => {
       fail(message.id, "approvalPolicy must be never");
       return;
     }
+    if (process.env.CODEX_FIXTURE_REQUIRE_SANDBOX === "1" && message.params?.sandbox !== "danger-full-access") {
+      fail(message.id, "sandbox must be danger-full-access");
+      return;
+    }
+    if (process.env.CODEX_FIXTURE_REQUIRE_SANDBOX === "1" && message.params?.ephemeral !== false) {
+      fail(message.id, "ephemeral must be false");
+      return;
+    }
     respond(message.id, {
       thread: { id: "thread-new" },
       model: message.params.model ?? "configured-model",
@@ -182,6 +190,10 @@ rl.on("line", (line) => {
     const prompt = message.params?.input?.[0]?.text;
     if (message.params?.input?.[0]?.type !== "text" || typeof prompt !== "string") {
       fail(message.id, "turn/start requires text input");
+      return;
+    }
+    if (process.env.CODEX_FIXTURE_REQUIRE_SANDBOX === "1" && message.params?.sandboxPolicy?.type !== "dangerFullAccess") {
+      fail(message.id, "sandboxPolicy must be dangerFullAccess");
       return;
     }
     activeTurns.set(message.params.threadId, turnId);

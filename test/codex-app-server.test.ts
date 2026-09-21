@@ -9,8 +9,18 @@ import { HybridCodexRunner } from "../src/codex/runner.js";
 const fixturesDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
 
 test("uses the Codex V2 initialize, thread, and turn lifecycle", async (t) => {
+  const previousRequireSandbox = process.env.CODEX_FIXTURE_REQUIRE_SANDBOX;
+  process.env.CODEX_FIXTURE_REQUIRE_SANDBOX = "1";
+  t.after(() => {
+    if (previousRequireSandbox === undefined) {
+      delete process.env.CODEX_FIXTURE_REQUIRE_SANDBOX;
+    } else {
+      process.env.CODEX_FIXTURE_REQUIRE_SANDBOX = previousRequireSandbox;
+    }
+  });
   const runner = new AppServerCodexRunner({
     codexBin: path.join(fixturesDir, "fake-codex-app-server.mjs"),
+    sandbox: "danger-full-access",
     requestTimeoutMs: 2_000
   });
   t.after(() => runner.close());

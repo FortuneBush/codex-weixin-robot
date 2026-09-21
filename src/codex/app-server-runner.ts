@@ -1,11 +1,14 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import readline from "node:readline";
 
+import { codexChildEnvironment } from "./environment.js";
 import { resolveCodexCommand, type CodexRunResult } from "./exec-runner.js";
+import type { CodexExecSandbox } from "./sandbox.js";
 import { parseCodexTokenUsage, type CodexTokenUsage } from "./usage.js";
 
 export type AppServerRunnerOptions = {
   codexBin?: string;
+  sandbox?: CodexExecSandbox;
   requestTimeoutMs?: number | null;
 };
 
@@ -123,7 +126,9 @@ export class AppServerCodexRunner {
         ...(input.threadId ? { threadId: input.threadId } : {}),
         cwd: input.cwd,
         model: input.model,
-        approvalPolicy: "never"
+        approvalPolicy: "never",
+        ...(!input.threadId ? { ephemeral: false } : {}),
+        sandbox: this.options.sandbox
       })
     ) as Record<string, unknown>;
     const thread = threadResponse.thread as Record<string, unknown> | undefined;
@@ -139,7 +144,8 @@ export class AppServerCodexRunner {
       cwd: input.cwd,
       approvalPolicy: "never",
       model: input.model,
-      effort: input.effort
+      effort: input.effort,
+      sandboxPolicy: sandboxPolicyFor(this.options.sandbox)
     })) as Record<string, unknown>;
     const turn = turnResponse.turn as Record<string, unknown> | undefined;
     const turnId = typeof turn?.id === "string" ? turn.id : undefined;
@@ -177,7 +183,10 @@ export class AppServerCodexRunner {
       if (!isThreadNotLoadedError(error)) {
         throw error;
       }
-      await this.request("thread/resume", { threadId });
+      await this.request("thread/resume", compactObject({
+        threadId,
+        sandbox: this.options.sandbox
+      }));
       response = await this.request("thread/read", { threadId, includeTurns: true }) as Record<string, unknown>;
     }
     const thread = response.thread as Record<string, unknown> | undefined;
@@ -272,6 +281,7 @@ export class AppServerCodexRunner {
   private async startAppServer(): Promise<void> {
     const command = resolveCodexCommand(this.options.codexBin ?? "codex");
     const child = spawn(command.command, [...command.argsPrefix, "app-server", "--stdio"], {
+      env: codexChildEnvironment(),
       stdio: ["pipe", "pipe", "pipe"],
       shell: false,
       windowsHide: true
@@ -703,6 +713,25 @@ function compactRuntimeInfo(input: { model?: unknown; effort?: unknown; provider
 
 function compactObject(input: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined));
+}
+
+function sandboxPolicyFor(sandbox: CodexExecSandbox | undefined): Record<string, unknown> | undefined {
+  switch (sandbox) {
+    case "read-only":
+      return { type: "readOnly", networkAccess: false };
+    case "workspace-write":
+      return {
+        type: "workspaceWrite",
+        networkAccess: false,
+        writableRoots: [],
+        excludeSlashTmp: false,
+        excludeTmpdirEnvVar: false
+      };
+    case "danger-full-access":
+      return { type: "dangerFullAccess" };
+    default:
+      return undefined;
+  }
 }
 
 function turnKey(threadId: string, turnId: string): string {

@@ -27,6 +27,7 @@ export class HybridCodexRunner {
   constructor(private readonly options: HybridCodexRunnerOptions) {
     this.appServer = new AppServerCodexRunner({
       codexBin: options.codexBin,
+      sandbox: options.execSandbox,
       requestTimeoutMs: options.timeoutMs
     });
     this.exec = new CodexExecRunner({

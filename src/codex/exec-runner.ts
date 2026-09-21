@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
+import { codexChildEnvironment } from "./environment.js";
 import type { CodexExecSandbox } from "./sandbox.js";
 import type { CodexTokenUsage } from "./usage.js";
 import { parseCodexTokenUsage } from "./usage.js";
@@ -77,6 +78,7 @@ export class CodexExecRunner {
     return new Promise((resolve, reject) => {
       const child = spawn(codexCommand.command, [...codexCommand.argsPrefix, ...args], {
         cwd: input.cwd,
+        env: codexChildEnvironment(),
         stdio: ["ignore", "pipe", "pipe"],
         shell: false,
         windowsHide: true
