@@ -13,7 +13,10 @@ export type MonitorOptions = {
   onMessageError?: (error: unknown, message: NormalizedWeixinMessage) => Promise<void> | void;
 };
 
-const ATTACHMENT_PAIR_WINDOW_MS = 2_000;
+// File uploads can take several seconds to appear in getUpdates after the
+// accompanying text. Keep likely attachment instructions pending long enough
+// to join that delayed update without holding ordinary text messages.
+const ATTACHMENT_PAIR_WINDOW_MS = 30_000;
 
 export class PollRetryBackoff {
   private readonly initialMs: number;
