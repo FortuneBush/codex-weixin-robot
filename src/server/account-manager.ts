@@ -24,7 +24,7 @@ import {
   type PublicWeixinAccount,
   type WeixinAccount
 } from "../weixin/accounts.js";
-import { WeixinApiClient } from "../weixin/api.js";
+import { isStaleContextError, WeixinApiClient } from "../weixin/api.js";
 import { monitorWeixin, type MonitorOptions } from "../weixin/monitor.js";
 import { inferMediaKind, sanitizeFileName } from "../weixin/media.js";
 
@@ -182,11 +182,20 @@ export class AccountManager {
       claimMessage: (message) => store.claimProcessedMessage(message.id),
       onMessage: (message) => service.handleMessage(message),
       onMessageError: async (error, message) => {
-        await client.sendText({
-          toUserId: message.senderId,
-          text: userFacingMessageHandlingError(error),
-          contextToken: store.getContextToken(message.senderId)
-        });
+        const text = userFacingMessageHandlingError(error);
+        try {
+          await client.sendText({
+            toUserId: message.senderId,
+            text,
+            contextToken: store.getContextToken(message.senderId)
+          });
+        } catch (sendError) {
+          if (isStaleContextError(sendError)) {
+            store.enqueuePendingDelivery(message.senderId, text);
+            return;
+          }
+          throw sendError;
+        }
       }
     }).then(() => {
       entry.status = "stopped";

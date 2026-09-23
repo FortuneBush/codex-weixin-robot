@@ -107,6 +107,29 @@ export class RuntimeStateStore {
     return this.state.contextTokens[senderId];
   }
 
+  listPendingDeliveries(senderId: string): Array<{ id: string; senderId: string; text: string; createdAt: string }> {
+    return this.state.pendingDeliveries
+      .filter((delivery) => delivery.senderId === senderId)
+      .map((delivery) => ({ ...delivery }));
+  }
+
+  enqueuePendingDelivery(senderId: string, text: string): void {
+    const normalized = text.trim();
+    if (!normalized) return;
+    this.state.pendingDeliveries = [
+      ...this.state.pendingDeliveries,
+      { id: crypto.randomUUID(), senderId, text: normalized, createdAt: new Date().toISOString() }
+    ].slice(-200);
+    this.save();
+  }
+
+  removePendingDelivery(deliveryId: string): void {
+    const next = this.state.pendingDeliveries.filter((delivery) => delivery.id !== deliveryId);
+    if (next.length === this.state.pendingDeliveries.length) return;
+    this.state.pendingDeliveries = next;
+    this.save();
+  }
+
   getLastActiveSenderId(): string | undefined {
     return this.state.lastActiveSenderId;
   }
@@ -409,8 +432,32 @@ function normalizeRuntimeState(value: Partial<RuntimeState>): RuntimeState {
     contextTokens: value.contextTokens && typeof value.contextTokens === "object" ? value.contextTokens : {},
     sessions: Array.isArray(value.sessions) ? value.sessions : [],
     activeSessionIds: value.activeSessionIds && typeof value.activeSessionIds === "object" ? value.activeSessionIds : {},
-    pendingDeliveries: Array.isArray(value.pendingDeliveries) ? value.pendingDeliveries : []
+    pendingDeliveries: normalizePendingDeliveries(value.pendingDeliveries)
   };
+}
+
+function normalizePendingDeliveries(value: unknown): RuntimeState["pendingDeliveries"] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((candidate) => {
+    if (!candidate || typeof candidate !== "object") return [];
+    const delivery = candidate as Record<string, unknown>;
+    if (
+      typeof delivery.id !== "string"
+      || typeof delivery.senderId !== "string"
+      || typeof delivery.text !== "string"
+      || typeof delivery.createdAt !== "string"
+      || !delivery.senderId.trim()
+      || !delivery.text.trim()
+    ) {
+      return [];
+    }
+    return [{
+      id: delivery.id,
+      senderId: delivery.senderId,
+      text: delivery.text,
+      createdAt: delivery.createdAt
+    }];
+  }).slice(-200);
 }
 
 function cleanTitle(value?: string): string | undefined {

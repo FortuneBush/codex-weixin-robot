@@ -27,6 +27,7 @@ export type BridgeServiceOptions = {
 const PROGRESS_SEND_INTERVAL_MS = 4_000;
 const PROGRESS_IMPORTANT_INTERVAL_MS = 2_000;
 const PROGRESS_HEARTBEAT_INTERVAL_MS = 60_000;
+const MAX_PROGRESS_MESSAGES_PER_TURN = 6;
 
 /**
  * Coalesces fast Codex progress events before sending them to WeChat.
@@ -43,12 +44,15 @@ class ProgressNotifier {
   private lastSentAt = 0;
   private lastSentText?: string;
   private lastEventAt = Date.now();
+  private progressCount = 0;
+  private deliveryUnavailable = false;
   private closed = false;
 
   constructor(
-    private readonly send: (text: string) => Promise<void>,
+    private readonly send: (text: string) => Promise<boolean | void>,
     private readonly intervalMs = PROGRESS_SEND_INTERVAL_MS,
-    private readonly heartbeatMs = PROGRESS_HEARTBEAT_INTERVAL_MS
+    private readonly heartbeatMs = PROGRESS_HEARTBEAT_INTERVAL_MS,
+    private readonly maxMessages = MAX_PROGRESS_MESSAGES_PER_TURN
   ) {
     this.heartbeatTimer = setInterval(() => {
       if (this.closed || Date.now() - this.lastEventAt < this.heartbeatMs || this.pending) return;
@@ -58,10 +62,10 @@ class ProgressNotifier {
   }
 
   push(text: string, options: { important?: boolean; heartbeat?: boolean } = {}): void {
-    if (this.closed) return;
     const normalized = normalizeProgressText(text);
     const important = options.important ?? isImportantProgress(normalized);
     const heartbeat = options.heartbeat === true;
+    if (this.closed || this.deliveryUnavailable || (!heartbeat && this.progressCount >= this.maxMessages)) return;
     if (!normalized || (!heartbeat && !important && !isMeaningfulProgress(normalized, this.lastSentText, this.pending?.text))) return;
     if (normalized === this.lastSentText || normalized === this.pending?.text) return;
     if (!heartbeat) this.lastEventAt = Date.now();
@@ -100,7 +104,14 @@ class ProgressNotifier {
   }
 
   private schedule(): void {
-    if (this.timer || !this.pending || this.closed || this.sending) return;
+    if (
+      this.timer
+      || !this.pending
+      || this.closed
+      || this.deliveryUnavailable
+      || this.sending
+      || (!this.pending.heartbeat && this.progressCount >= this.maxMessages)
+    ) return;
     const interval = this.pending.important
       ? PROGRESS_IMPORTANT_INTERVAL_MS
       : this.intervalMs;
@@ -118,7 +129,14 @@ class ProgressNotifier {
   }
 
   private rescheduleIfNeeded(): void {
-    if (!this.pending || !this.timer || this.closed || this.sending) return;
+    if (
+      !this.pending
+      || !this.timer
+      || this.closed
+      || this.deliveryUnavailable
+      || this.sending
+      || (!this.pending.heartbeat && this.progressCount >= this.maxMessages)
+    ) return;
     const interval = this.pending.important
       ? PROGRESS_IMPORTANT_INTERVAL_MS
       : this.intervalMs;
@@ -137,17 +155,21 @@ class ProgressNotifier {
     this.pending = undefined;
     if (!pending) return;
     const text = pending.text;
+    if (!pending.heartbeat) this.progressCount += 1;
     this.lastSentAt = Date.now();
     this.lastSentText = text;
     this.sending = true;
     this.sendChain = this.sendChain
       .then(() => this.send(text))
+      .then((sent) => {
+        if (sent === false) this.deliveryUnavailable = true;
+      })
       .catch((error) => {
         console.warn(`WeChat progress reply failed: ${error instanceof Error ? error.message : String(error)}`);
       })
       .then(() => {
         this.sending = false;
-        this.schedule();
+        if (!this.deliveryUnavailable) this.schedule();
       });
   }
 }
@@ -157,7 +179,7 @@ function normalizeProgressText(text: string): string {
 }
 
 function isImportantProgress(text: string): boolean {
-  return /^(?:已收到|正在执行命令|正在修改文件|正在调用|正在搜索|正在协调|失败|错误|中断|已完成)/u.test(text);
+  return /^(?:已收到|正在执行命令|正在修改文件|正在调用|正在搜索|正在协调|失败|错误|中断)/u.test(text);
 }
 
 function isMeaningfulProgress(text: string, lastSent?: string, pending?: string): boolean {
@@ -203,6 +225,7 @@ export class BridgeService {
       return;
     }
     this.options.stateStore.setPairedSenderIds(this.access.listPairedSenderIds());
+    await this.flushPendingDeliveries(message.senderId);
     this.options.stateStore.ensureActiveSession(message.senderId, this.options.config.defaultCwd);
 
     const command = parseCommand(message.text);
@@ -527,7 +550,9 @@ export class BridgeService {
     const progressEnabled = session.streamReplies ?? this.options.config.streamReplies;
     const sentProgress = new Set<string>();
     const progressNotifier = progressEnabled
-      ? new ProgressNotifier((progress) => this.reply(message.senderId, `【进度】${progress}`))
+      ? new ProgressNotifier(async (progress) => {
+        return this.reply(message.senderId, `【进度】${progress}`, { durable: false });
+      })
       : undefined;
     this.options.onTurnStatus?.({ senderId: message.senderId, sessionId: session.id, active: true });
     try {
@@ -558,7 +583,7 @@ export class BridgeService {
         const remaining = chunkText(parsed.visibleText);
         if (remaining.length) {
           for (const chunk of remaining) {
-            await this.reply(message.senderId, chunk);
+            await this.reply(message.senderId, chunk, { durable: true });
           }
         }
         for (const action of parsed.actions.send) {
@@ -655,16 +680,36 @@ export class BridgeService {
     };
   }
 
-  private async reply(senderId: string, text: string): Promise<void> {
+  private async flushPendingDeliveries(senderId: string): Promise<void> {
+    for (const delivery of this.options.stateStore.listPendingDeliveries(senderId)) {
+      try {
+        const sent = await this.reply(senderId, delivery.text, { durable: false });
+        if (!sent) return;
+        this.options.stateStore.removePendingDelivery(delivery.id);
+      } catch (error) {
+        console.warn(`Pending WeChat delivery failed for ${senderId}: ${error instanceof Error ? error.message : String(error)}`);
+        return;
+      }
+    }
+  }
+
+  private async reply(senderId: string, text: string, options: { durable?: boolean } = {}): Promise<boolean> {
     const contextToken = this.options.stateStore.getContextToken(senderId);
     try {
       console.log(`[codex-weixin] sending reply to ${senderId}; text=${text.length} chars`);
       await this.options.weixin.sendText({ toUserId: senderId, text, contextToken });
       console.log(`[codex-weixin] sent reply to ${senderId}`);
+      return true;
     } catch (error) {
       if (isStaleContextError(error)) {
-        console.warn(`WeChat context token is stale for ${senderId}; ask user to send a fresh message.`);
-        return;
+        if (options.durable) {
+          this.options.stateStore.enqueuePendingDelivery(senderId, text);
+        }
+        console.warn(`WeChat context token is stale for ${senderId}; queued the reply until the next user message.`);
+        return false;
+      }
+      if (options.durable) {
+        this.options.stateStore.enqueuePendingDelivery(senderId, text);
       }
       throw error;
     }

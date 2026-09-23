@@ -165,6 +165,21 @@ test("persistently claims inbound message ids once and bounds the history", (t) 
   assert.equal(store.snapshot.processedMessageIds.includes("message-one"), false);
 });
 
+test("persists pending WeChat deliveries until they are removed", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-delivery-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const paths = resolveStatePaths(root);
+  const store = new RuntimeStateStore(paths);
+
+  store.enqueuePendingDelivery("alice@im.wechat", "最终答案");
+
+  assert.equal(store.listPendingDeliveries("alice@im.wechat").length, 1);
+  const reloaded = new RuntimeStateStore(paths).listPendingDeliveries("alice@im.wechat");
+  assert.equal(reloaded[0]?.text, "最终答案");
+  store.removePendingDelivery(reloaded[0]!.id);
+  assert.deepEqual(store.listPendingDeliveries("alice@im.wechat"), []);
+});
+
 test("stores the latest WeChat sync key across monitor restarts", (t) => {
   const store = createStore(t);
 

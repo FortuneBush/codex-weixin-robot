@@ -10,6 +10,7 @@ import { buildPrompt } from "../src/bridge/format.js";
 import { defaultConfig, MAX_INBOUND_BYTES } from "../src/state/config.js";
 import { resolveStatePaths } from "../src/state/paths.js";
 import { RuntimeStateStore } from "../src/state/runtime-state.js";
+import { WeixinApiError } from "../src/weixin/api.js";
 import { encryptAesEcb } from "../src/weixin/media.js";
 import { normalizeWeixinMessage } from "../src/weixin/messages.js";
 
@@ -67,6 +68,57 @@ test("reports WeChat Codex turn status and resolves runtime details for status",
   });
   assert.match(replies.at(-1) ?? "", /model: gpt-test/);
   assert.match(replies.at(-1) ?? "", /effort: high/);
+});
+
+test("queues a final answer rejected by a stale context and retries it on the next message", async (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-pending-delivery-"));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  const stateStore = new RuntimeStateStore(resolveStatePaths(path.join(tmpDir, "state")));
+  const replies: Array<{ text: string; contextToken?: string }> = [];
+  const service = new BridgeService({
+    config: {
+      ...defaultConfig(tmpDir),
+      allowedSenderIds: ["alice@im.wechat"],
+      streamReplies: false
+    },
+    stateStore,
+    weixin: {
+      async sendTyping() {},
+      async sendText(input: { text: string; contextToken?: string }) {
+        if (input.text === "最终答案" && input.contextToken === "old-context") {
+          throw new WeixinApiError("stale", "sendmessage", -2);
+        }
+        replies.push({ text: input.text, contextToken: input.contextToken });
+        return { messageId: "text-message" };
+      }
+    } as never,
+    runner: {
+      async run() {
+        return { raw: "", threadId: "thread-pending", text: "最终答案" };
+      },
+      async stop() {}
+    } as never
+  });
+
+  await service.handleMessage({
+    id: "first",
+    senderId: "alice@im.wechat",
+    contextToken: "old-context",
+    text: "开始任务",
+    raw: {}
+  });
+  assert.deepEqual(stateStore.listPendingDeliveries("alice@im.wechat").map((item) => item.text), ["最终答案"]);
+
+  await service.handleMessage({
+    id: "next",
+    senderId: "alice@im.wechat",
+    contextToken: "new-context",
+    text: "/status",
+    raw: {}
+  });
+  assert.equal(stateStore.listPendingDeliveries("alice@im.wechat").length, 0);
+  assert.equal(replies[0]?.text, "最终答案");
+  assert.equal(replies[0]?.contextToken, "new-context");
 });
 
 test("sends local markdown images as native WeChat image messages", async (t) => {
