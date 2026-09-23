@@ -117,6 +117,71 @@ test("continues with the remaining batch after one message fails", async (t) => 
   assert.deepEqual(failures, ["first:message failed"]);
 });
 
+test("merges an attachment followed by a text instruction from the same sender", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const controller = new AbortController();
+  const claimed: string[] = [];
+  const handled: Array<{ id: string; text: string; contextToken?: string; attachments: number }> = [];
+  let polls = 0;
+  const client = {
+    async getUpdates() {
+      polls += 1;
+      if (polls === 1) {
+        return {
+          msgs: [
+            {
+              message_id: "file",
+              from_user_id: "alice",
+              context_token: "file-context",
+              item_list: [{
+                type: 4,
+                file_item: {
+                  file_name: "report.pdf",
+                  media: { full_url: "https://example.test/report.pdf" }
+                }
+              }]
+            },
+            {
+              message_id: "instruction",
+              from_user_id: "alice",
+              context_token: "text-context",
+              text: "分析这个pdf"
+            }
+          ]
+        };
+      }
+      controller.abort();
+      return { msgs: [] };
+    }
+  } as WeixinApiClient;
+
+  await monitorWeixin({
+    client,
+    signal: controller.signal,
+    pollIntervalMs: 0,
+    claimMessage(message) {
+      claimed.push(message.id);
+      return true;
+    },
+    async onMessage(message) {
+      handled.push({
+        id: message.id,
+        text: message.text,
+        contextToken: message.contextToken,
+        attachments: message.attachments.length
+      });
+    }
+  });
+
+  assert.deepEqual(claimed, ["file", "instruction"]);
+  assert.deepEqual(handled, [{
+    id: "file",
+    text: "分析这个pdf",
+    contextToken: "text-context",
+    attachments: 1
+  }]);
+});
+
 test("skips duplicate message ids and persists the latest sync key", async (t) => {
   t.mock.method(console, "log", () => {});
   const controller = new AbortController();

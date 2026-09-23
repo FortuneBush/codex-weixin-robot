@@ -20,6 +20,16 @@ test("returns a retry hint for timeouts", () => {
   );
 });
 
+test("explains upstream 502 failures without misreporting a local timeout", () => {
+  const message = userFacingMessageHandlingError(
+    new Error("unexpected status 502 Bad Gateway: Unknown error")
+  );
+
+  assert.match(message, /502|Bad Gateway/i);
+  assert.match(message, /稍后重试/);
+  assert.doesNotMatch(message, /任务执行时间过长/);
+});
+
 test("does not expose arbitrary local errors to WeChat", () => {
   const message = userFacingMessageHandlingError(new Error("secret path C:/private/token.txt"));
 

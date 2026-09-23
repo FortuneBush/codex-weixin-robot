@@ -58,6 +58,7 @@ export async function monitorWeixin(options: MonitorOptions): Promise<void> {
     if (messages.length) {
       console.log(`[codex-weixin] received ${messages.length} update(s)`);
     }
+    const normalizedMessages: NormalizedWeixinMessage[] = [];
     for (const raw of messages) {
       let normalized: NormalizedWeixinMessage | undefined;
       try {
@@ -73,6 +74,13 @@ export async function monitorWeixin(options: MonitorOptions): Promise<void> {
         console.log(`[codex-weixin] skipped duplicate message ${normalized.id} from ${normalized.senderId}`);
         continue;
       }
+      normalizedMessages.push(normalized);
+    }
+
+    // WeChat commonly delivers a file and the user's follow-up instruction as
+    // two adjacent messages. Treat that pair as one prompt so the attachment
+    // does not start a long-running turn before the instruction arrives.
+    for (const normalized of mergeAttachmentFollowUps(normalizedMessages)) {
       try {
         console.log(`[codex-weixin] handling message ${normalized.id} from ${normalized.senderId}`);
         await options.onMessage(normalized);
@@ -90,6 +98,31 @@ export async function monitorWeixin(options: MonitorOptions): Promise<void> {
       await delay(pollIntervalMs, options.signal);
     }
   }
+}
+
+function mergeAttachmentFollowUps(messages: NormalizedWeixinMessage[]): NormalizedWeixinMessage[] {
+  const merged: NormalizedWeixinMessage[] = [];
+  for (const message of messages) {
+    const previous = merged.at(-1);
+    if (
+      previous
+      && previous.senderId === message.senderId
+      && previous.attachments.length > 0
+      && !previous.text.trim()
+      && message.attachments.length === 0
+      && message.text.trim()
+    ) {
+      merged[merged.length - 1] = {
+        ...previous,
+        contextToken: message.contextToken ?? previous.contextToken,
+        text: message.text.trim(),
+        raw: message.raw
+      };
+      continue;
+    }
+    merged.push(message);
+  }
+  return merged;
 }
 
 function parseUpdateBatch(value: unknown): { syncKey?: string; messages: WeixinRawMessage[] } {

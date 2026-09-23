@@ -10,5 +10,8 @@ export function userFacingMessageHandlingError(error: unknown): string {
   if (/timed out|timeout/i.test(message)) {
     return "[codex-weixin] 本轮任务执行时间过长，已停止处理。请拆成更小的步骤后重试。";
   }
+  if (/\b502\b|bad gateway/i.test(message)) {
+    return "[codex-weixin] 上游 Codex 服务暂时返回 502（Bad Gateway），本地服务没有超时。请稍后重试。";
+  }
   return "[codex-weixin] 本轮消息处理失败，详细错误已写入本机服务输出。";
 }
