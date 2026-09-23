@@ -182,6 +182,65 @@ test("merges an attachment followed by a text instruction from the same sender",
   }]);
 });
 
+test("merges a text instruction and a delayed attachment from separate polls", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const controller = new AbortController();
+  const handled: Array<{ text: string; contextToken?: string; attachments: number }> = [];
+  let polls = 0;
+  const client = {
+    async getUpdates() {
+      polls += 1;
+      if (polls === 1) {
+        return {
+          msgs: [{
+            message_id: "instruction-first",
+            from_user_id: "alice",
+            context_token: "instruction-context",
+            text: "分析这篇文章"
+          }]
+        };
+      }
+      if (polls === 2) {
+        return {
+          msgs: [{
+            message_id: "file-second",
+            from_user_id: "alice",
+            context_token: "file-context",
+            item_list: [{
+              type: 4,
+              file_item: {
+                file_name: "article.pdf",
+                media: { full_url: "https://example.test/article.pdf" }
+              }
+            }]
+          }]
+        };
+      }
+      controller.abort();
+      return { msgs: [] };
+    }
+  } as WeixinApiClient;
+
+  await monitorWeixin({
+    client,
+    signal: controller.signal,
+    pollIntervalMs: 0,
+    async onMessage(message) {
+      handled.push({
+        text: message.text,
+        contextToken: message.contextToken,
+        attachments: message.attachments.length
+      });
+    }
+  });
+
+  assert.deepEqual(handled, [{
+    text: "分析这篇文章",
+    contextToken: "file-context",
+    attachments: 1
+  }]);
+});
+
 test("skips duplicate message ids and persists the latest sync key", async (t) => {
   t.mock.method(console, "log", () => {});
   const controller = new AbortController();

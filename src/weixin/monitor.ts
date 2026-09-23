@@ -13,6 +13,8 @@ export type MonitorOptions = {
   onMessageError?: (error: unknown, message: NormalizedWeixinMessage) => Promise<void> | void;
 };
 
+const ATTACHMENT_PAIR_WINDOW_MS = 2_000;
+
 export class PollRetryBackoff {
   private readonly initialMs: number;
   private readonly maxMs: number;
@@ -39,6 +41,65 @@ export async function monitorWeixin(options: MonitorOptions): Promise<void> {
   let syncKey = options.initialSyncKey;
   const pollIntervalMs = options.pollIntervalMs ?? 1000;
   const retryBackoff = new PollRetryBackoff(pollIntervalMs, options.maxPollRetryMs ?? 30_000);
+  const pendingPairs = new Map<string, { message: NormalizedWeixinMessage; timer: NodeJS.Timeout }>();
+  const activeHandlers = new Set<Promise<void>>();
+  const senderChains = new Map<string, Promise<void>>();
+
+  const reportError = async (error: unknown, message: NormalizedWeixinMessage): Promise<void> => {
+    console.error(`[codex-weixin] message handling failed for ${message.senderId}: ${errorDetail(error)}`);
+    try {
+      await options.onMessageError?.(error, message);
+    } catch (reportError) {
+      console.error(`[codex-weixin] failed to report message error for ${message.senderId}: ${errorDetail(reportError)}`);
+    }
+  };
+
+  const dispatch = (message: NormalizedWeixinMessage): void => {
+    const previous = senderChains.get(message.senderId) ?? Promise.resolve();
+    let task: Promise<void>;
+    task = previous
+      .catch(() => {})
+      .then(async () => {
+        console.log(`[codex-weixin] handling message ${message.id} from ${message.senderId}`);
+        await options.onMessage(message);
+        console.log(`[codex-weixin] handled message ${message.id} from ${message.senderId}`);
+      })
+      .catch((error) => reportError(error, message))
+      .finally(() => {
+        activeHandlers.delete(task);
+        if (senderChains.get(message.senderId) === task) {
+          senderChains.delete(message.senderId);
+        }
+      });
+    senderChains.set(message.senderId, task);
+    activeHandlers.add(task);
+  };
+
+  const flushPending = (senderId: string): void => {
+    const pending = pendingPairs.get(senderId);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    pendingPairs.delete(senderId);
+    dispatch(pending.message);
+  };
+
+  const queueMessage = (message: NormalizedWeixinMessage): void => {
+    const previous = pendingPairs.get(message.senderId);
+    if (previous && canPairAttachmentMessage(previous.message, message)) {
+      clearTimeout(previous.timer);
+      pendingPairs.delete(message.senderId);
+      dispatch(mergeAttachmentMessages(previous.message, message));
+      return;
+    }
+    if (previous) flushPending(message.senderId);
+    if (!shouldWaitForAttachment(message)) {
+      dispatch(message);
+      return;
+    }
+    const timer = setTimeout(() => flushPending(message.senderId), ATTACHMENT_PAIR_WINDOW_MS);
+    pendingPairs.set(message.senderId, { message, timer });
+  };
+
   while (!options.signal?.aborted) {
     let batch: { syncKey?: string; messages: WeixinRawMessage[] };
     try {
@@ -77,27 +138,17 @@ export async function monitorWeixin(options: MonitorOptions): Promise<void> {
       normalizedMessages.push(normalized);
     }
 
-    // WeChat commonly delivers a file and the user's follow-up instruction as
-    // two adjacent messages. Treat that pair as one prompt so the attachment
-    // does not start a long-running turn before the instruction arrives.
-    for (const normalized of mergeAttachmentFollowUps(normalizedMessages)) {
-      try {
-        console.log(`[codex-weixin] handling message ${normalized.id} from ${normalized.senderId}`);
-        await options.onMessage(normalized);
-        console.log(`[codex-weixin] handled message ${normalized.id} from ${normalized.senderId}`);
-      } catch (error) {
-        console.error(`[codex-weixin] message handling failed for ${normalized.senderId}: ${errorDetail(error)}`);
-        try {
-          await options.onMessageError?.(error, normalized);
-        } catch (reportError) {
-          console.error(`[codex-weixin] failed to report message error for ${normalized.senderId}: ${errorDetail(reportError)}`);
-        }
-      }
-    }
+    // WeChat commonly delivers a file and the user's instruction as separate
+    // nearby messages. Treat that pair as one prompt so the attachment and
+    // instruction do not start separate long-running turns.
+    for (const normalized of mergeAttachmentFollowUps(normalizedMessages)) queueMessage(normalized);
     if (!messages.length) {
       await delay(pollIntervalMs, options.signal);
     }
   }
+
+  for (const senderId of pendingPairs.keys()) flushPending(senderId);
+  await Promise.allSettled(activeHandlers);
 }
 
 function mergeAttachmentFollowUps(messages: NormalizedWeixinMessage[]): NormalizedWeixinMessage[] {
@@ -107,22 +158,38 @@ function mergeAttachmentFollowUps(messages: NormalizedWeixinMessage[]): Normaliz
     if (
       previous
       && previous.senderId === message.senderId
-      && previous.attachments.length > 0
-      && !previous.text.trim()
-      && message.attachments.length === 0
-      && message.text.trim()
+      && canPairAttachmentMessage(previous, message)
     ) {
-      merged[merged.length - 1] = {
-        ...previous,
-        contextToken: message.contextToken ?? previous.contextToken,
-        text: message.text.trim(),
-        raw: message.raw
-      };
+      merged[merged.length - 1] = mergeAttachmentMessages(previous, message);
       continue;
     }
     merged.push(message);
   }
   return merged;
+}
+
+function canPairAttachmentMessage(first: NormalizedWeixinMessage, second: NormalizedWeixinMessage): boolean {
+  return first.senderId === second.senderId
+    && ((first.attachments.length > 0 && !first.text.trim() && second.attachments.length === 0 && Boolean(second.text.trim()))
+      || (second.attachments.length > 0 && !second.text.trim() && first.attachments.length === 0 && Boolean(first.text.trim())));
+}
+
+function mergeAttachmentMessages(first: NormalizedWeixinMessage, second: NormalizedWeixinMessage): NormalizedWeixinMessage {
+  const attachmentMessage = first.attachments.length > 0 ? first : second;
+  const textMessage = first.attachments.length > 0 ? second : first;
+  return {
+    ...attachmentMessage,
+    contextToken: second.contextToken ?? first.contextToken,
+    text: textMessage.text.trim(),
+    raw: textMessage.raw
+  };
+}
+
+function shouldWaitForAttachment(message: NormalizedWeixinMessage): boolean {
+  if (message.attachments.length > 0) return !message.text.trim();
+  const text = message.text.trim();
+  if (!text || text.startsWith("/")) return false;
+  return /(?:pdf|文件|附件|文章|论文|截图|图片|报告|文档|paper|article|document|file|screenshot)/iu.test(text);
 }
 
 function parseUpdateBatch(value: unknown): { syncKey?: string; messages: WeixinRawMessage[] } {
