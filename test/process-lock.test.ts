@@ -30,3 +30,16 @@ test("replaces a stale service process lock", (t) => {
   const lock = acquireServiceProcessLock(root);
   lock.release();
 });
+
+test("replaces a lock from a previous boot even when its PID was reused", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-reused-pid-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const bootAt = Date.now() - os.uptime() * 1_000;
+  fs.writeFileSync(path.join(root, "service.lock"), JSON.stringify({
+    pid: process.pid,
+    startedAt: new Date(bootAt - 1_000).toISOString()
+  }));
+
+  const lock = acquireServiceProcessLock(root);
+  lock.release();
+});

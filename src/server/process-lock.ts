@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import { ensureDir } from "../state/json-store.js";
@@ -42,7 +43,7 @@ export function acquireServiceProcessLock(stateRoot: string): ServiceProcessLock
       if (!existing) {
         throw new Error(`codex-weixin lock is unreadable: ${lockPath}`);
       }
-      if (isProcessRunning(existing.pid)) {
+      if (isProcessRunning(existing.pid, existing.startedAt)) {
         throw new Error(`codex-weixin is already running for ${stateRoot} (PID ${existing.pid})`);
       }
       fs.rmSync(lockPath, { force: true });
@@ -62,7 +63,15 @@ function readLockRecord(lockPath: string): LockRecord | undefined {
   }
 }
 
-function isProcessRunning(pid: number): boolean {
+function isProcessRunning(pid: number, startedAt: string): boolean {
+  // A process cannot survive a reboot. Windows may reuse its PID for an
+  // unrelated system process, so a lock created before the current boot is
+  // stale even when process.kill(pid, 0) succeeds.
+  const startedAtMs = Date.parse(startedAt);
+  const bootAtMs = Date.now() - os.uptime() * 1_000;
+  if (Number.isFinite(startedAtMs) && startedAtMs < bootAtMs) {
+    return false;
+  }
   try {
     process.kill(pid, 0);
     return true;
