@@ -95,6 +95,10 @@ rl.on("line", (line) => {
       failWithCode(message.id, -32600, "no rollout found for thread id thread-stale");
       return;
     }
+    if (message.params.threadId === "thread-notloaded") {
+      failWithCode(message.id, -32600, "thread notloaded: thread-notloaded");
+      return;
+    }
     respond(message.id, {
       thread: { id: message.params.threadId },
       model: "resumed-model",

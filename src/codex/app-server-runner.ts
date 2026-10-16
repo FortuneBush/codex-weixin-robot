@@ -61,6 +61,7 @@ type TurnCompletion = {
   status: string;
   text: string;
   raw: string;
+  model?: string;
   error?: string;
   usage?: CodexTokenUsage;
 };
@@ -104,6 +105,7 @@ export class AppServerCodexRunner {
   private stderr = "";
   private readonly pending = new Map<JsonRpcId, PendingRequest>();
   private readonly activeTurns = new Map<string, string>();
+  private readonly modelByTurn = new Map<string, string>();
   private readonly turnWaiters = new Map<string, TurnWaiter>();
   private readonly turnEvents = new Map<string, string[]>();
   private readonly turnTexts = new Map<string, string>();
@@ -139,7 +141,8 @@ export class AppServerCodexRunner {
     if (!threadId) {
       throw new Error("Codex app-server did not return a thread id");
     }
-    this.runtimeInfoByThread.set(threadId, runtimeInfoFromThreadResponse(threadResponse));
+    const runtimeInfo = runtimeInfoFromThreadResponse(threadResponse);
+    this.runtimeInfoByThread.set(threadId, runtimeInfo);
 
     const turnResponse = await this.request("turn/start", compactObject({
       threadId,
@@ -157,6 +160,10 @@ export class AppServerCodexRunner {
     }
 
     this.activeTurns.set(threadId, turnId);
+    const model = runtimeInfo.model ?? input.model;
+    if (model) {
+      this.modelByTurn.set(turnKey(threadId, turnId), model);
+    }
     if (input.onDelta || input.onProgress) {
       const key = turnKey(threadId, turnId);
       this.turnStreams.set(key, {
@@ -491,6 +498,7 @@ export class AppServerCodexRunner {
       text: this.turnTexts.get(key) ?? extractAgentMessageFromTurn(turn),
       raw: (this.turnEvents.get(key) ?? []).join("\n"),
       error: typeof errorValue?.message === "string" ? errorValue.message : undefined,
+      model: this.modelByTurn.get(key),
       usage: parseCodexTokenUsage(turn?.usage ?? params.usage) ?? this.tokenUsageByTurn.get(key)
     };
     this.activeTurns.delete(threadId);
@@ -544,11 +552,14 @@ export class AppServerCodexRunner {
     this.itemPhasesByTurn.delete(key);
     this.clearCommentaryForTurn(key);
     this.tokenUsageByTurn.delete(key);
+    const model = completion.model;
+    this.modelByTurn.delete(key);
     if (completion.status === "completed") {
       resolve({
         text: completion.text,
         threadId,
         raw: completion.raw,
+        ...(model ? { model } : {}),
         ...(completion.usage ? { usage: completion.usage } : {})
       });
       return;
@@ -707,6 +718,7 @@ export class AppServerCodexRunner {
       waiter.reject(error);
     }
     this.activeTurns.clear();
+    this.modelByTurn.clear();
     this.turnEvents.clear();
     this.turnTexts.clear();
     this.completedTurns.clear();
@@ -724,12 +736,12 @@ export class AppServerCodexRunner {
 
 export function isUnavailableCodexThreadError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /(?:no rollout found for thread id|thread not loaded|thread not found)/i.test(message);
+  return /(?:no rollout found for thread id|thread\s+not[\s_-]*loaded|thread not found)/i.test(message);
 }
 
 function isThreadNotLoadedError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /thread not loaded/i.test(message);
+  return /thread\s+not[\s_-]*loaded/i.test(message);
 }
 
 function turnKeyFromParams(params: Record<string, unknown>): string | undefined {
@@ -768,11 +780,35 @@ function parseModelOption(value: unknown): CodexModelOption | undefined {
 }
 
 function runtimeInfoFromThreadResponse(response: Record<string, unknown>): CodexRuntimeInfo {
+  const thread = asRecord(response.thread);
+  const runtimeInfo = asRecord(response.runtimeInfo) ?? asRecord(response.runtime_info)
+    ?? asRecord(thread?.runtimeInfo) ?? asRecord(thread?.runtime_info);
   return compactRuntimeInfo({
-    model: response.model,
-    effort: response.reasoningEffort,
-    provider: response.modelProvider ?? response.model_provider
+    model: firstString(response.model, runtimeInfo?.model, thread?.model),
+    effort: firstString(response.reasoningEffort, runtimeInfo?.effort, thread?.reasoningEffort),
+    provider: firstString(
+      response.modelProvider,
+      response.model_provider,
+      runtimeInfo?.provider,
+      runtimeInfo?.modelProvider,
+      runtimeInfo?.model_provider,
+      thread?.modelProvider,
+      thread?.model_provider
+    )
   });
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function firstString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
 }
 
 function compactRuntimeInfo(input: { model?: unknown; effort?: unknown; provider?: unknown }): CodexRuntimeInfo {

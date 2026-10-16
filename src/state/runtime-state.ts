@@ -17,6 +17,7 @@ export type SessionTokenUsage = {
 export type SessionTokenUsageRecord = {
   at: string;
   threadId?: string;
+  model?: string;
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
@@ -81,6 +82,7 @@ export class RuntimeStateStore {
   }
 
   get snapshot(): RuntimeState {
+    this.refreshBeforeRead();
     return structuredClone(this.state);
   }
 
@@ -88,32 +90,52 @@ export class RuntimeStateStore {
     writeJsonFile(this.paths.statePath, this.state);
   }
 
+  /**
+   * A process can have more than one RuntimeStateStore for an account (for
+   * example, the HTTP and WeChat paths can be initialized independently).
+   * Refresh before every mutation so a stale instance does not overwrite a
+   * change that another instance has already persisted.
+   */
+  private refreshBeforeMutation(): void {
+    this.state = normalizeRuntimeState(readJsonFile<Partial<RuntimeState>>(this.paths.statePath, {}));
+  }
+
+  private refreshBeforeRead(): void {
+    this.state = normalizeRuntimeState(readJsonFile<Partial<RuntimeState>>(this.paths.statePath, {}));
+  }
+
   listPairedSenderIds(): string[] {
+    this.refreshBeforeRead();
     return [...new Set(this.state.pairedSenderIds)].sort();
   }
 
   setPairedSenderIds(senderIds: string[]): void {
+    this.refreshBeforeMutation();
     this.state.pairedSenderIds = [...new Set(senderIds)].sort();
     this.save();
   }
 
   rememberContextToken(senderId: string, token: string): void {
+    this.refreshBeforeMutation();
     this.state.contextTokens[senderId] = token;
     this.state.lastActiveSenderId = senderId;
     this.save();
   }
 
   getContextToken(senderId: string): string | undefined {
+    this.refreshBeforeRead();
     return this.state.contextTokens[senderId];
   }
 
   listPendingDeliveries(senderId: string): Array<{ id: string; senderId: string; text: string; createdAt: string }> {
+    this.refreshBeforeRead();
     return this.state.pendingDeliveries
       .filter((delivery) => delivery.senderId === senderId)
       .map((delivery) => ({ ...delivery }));
   }
 
   enqueuePendingDelivery(senderId: string, text: string): void {
+    this.refreshBeforeMutation();
     const normalized = text.trim();
     if (!normalized) return;
     this.state.pendingDeliveries = [
@@ -124,6 +146,7 @@ export class RuntimeStateStore {
   }
 
   removePendingDelivery(deliveryId: string): void {
+    this.refreshBeforeMutation();
     const next = this.state.pendingDeliveries.filter((delivery) => delivery.id !== deliveryId);
     if (next.length === this.state.pendingDeliveries.length) return;
     this.state.pendingDeliveries = next;
@@ -131,14 +154,17 @@ export class RuntimeStateStore {
   }
 
   getLastActiveSenderId(): string | undefined {
+    this.refreshBeforeRead();
     return this.state.lastActiveSenderId;
   }
 
   getSyncKey(): string | undefined {
+    this.refreshBeforeRead();
     return this.state.syncKey;
   }
 
   setSyncKey(syncKey: string): void {
+    this.refreshBeforeMutation();
     if (!syncKey || this.state.syncKey === syncKey) {
       return;
     }
@@ -147,6 +173,17 @@ export class RuntimeStateStore {
   }
 
   claimProcessedMessage(messageId: string): boolean {
+    return this.markProcessedMessage(messageId);
+  }
+
+  hasProcessedMessage(messageId: string): boolean {
+    this.refreshBeforeRead();
+    const id = messageId.trim();
+    return Boolean(id) && this.state.processedMessageIds.includes(id);
+  }
+
+  markProcessedMessage(messageId: string): boolean {
+    this.refreshBeforeMutation();
     const id = messageId.trim();
     if (!id || this.state.processedMessageIds.includes(id)) {
       return false;
@@ -157,7 +194,18 @@ export class RuntimeStateStore {
     return true;
   }
 
+  releaseProcessedMessage(messageId: string): void {
+    this.refreshBeforeMutation();
+    const id = messageId.trim();
+    if (!id) return;
+    const next = this.state.processedMessageIds.filter((candidate) => candidate !== id);
+    if (next.length === this.state.processedMessageIds.length) return;
+    this.state.processedMessageIds = next;
+    this.save();
+  }
+
   setWorkspace(senderId: string, workspace: string): void {
+    this.refreshBeforeMutation();
     this.ensureActiveSession(senderId, workspace);
     const session = this.mutableActiveSession(senderId)!;
     session.workspace = this.workspaceRoot
@@ -169,10 +217,12 @@ export class RuntimeStateStore {
   }
 
   getWorkspace(senderId: string): string | undefined {
+    this.refreshBeforeRead();
     return this.getActiveSession(senderId)?.workspace;
   }
 
   setThread(senderId: string, threadId: string): void {
+    this.refreshBeforeMutation();
     const session = this.mutableActiveSession(senderId);
     if (!session) {
       throw new Error(`No active session for sender: ${senderId}`);
@@ -187,10 +237,12 @@ export class RuntimeStateStore {
   }
 
   getThread(senderId: string): string | undefined {
+    this.refreshBeforeRead();
     return this.getActiveSession(senderId)?.threadId;
   }
 
   setModelOverride(senderId: string, model?: string): void {
+    this.refreshBeforeMutation();
     const session = this.mutableActiveSession(senderId);
     if (!session) {
       throw new Error(`No active session for sender: ${senderId}`);
@@ -205,6 +257,7 @@ export class RuntimeStateStore {
   }
 
   setEffortOverride(senderId: string, effort?: string): void {
+    this.refreshBeforeMutation();
     const session = this.mutableActiveSession(senderId);
     if (!session) {
       throw new Error(`No active session for sender: ${senderId}`);
@@ -219,6 +272,7 @@ export class RuntimeStateStore {
   }
 
   setStreamRepliesOverride(senderId: string, streamReplies?: boolean): void {
+    this.refreshBeforeMutation();
     const session = this.mutableActiveSession(senderId);
     if (!session) {
       throw new Error(`No active session for sender: ${senderId}`);
@@ -233,22 +287,26 @@ export class RuntimeStateStore {
   }
 
   listSessions(): ManagedSession[] {
+    this.refreshBeforeRead();
     return structuredClone(this.state.sessions)
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
   getSession(sessionId: string): ManagedSession | undefined {
+    this.refreshBeforeRead();
     const session = this.state.sessions.find((candidate) => candidate.id === sessionId);
     return session ? structuredClone(session) : undefined;
   }
 
   getActiveSession(senderId: string): ManagedSession | undefined {
+    this.refreshBeforeRead();
     const sessionId = this.state.activeSessionIds[senderId];
     const session = this.state.sessions.find((candidate) => candidate.id === sessionId && candidate.senderId === senderId);
     return session ? structuredClone(session) : undefined;
   }
 
   ensureActiveSession(senderId: string, workspace: string): ManagedSession {
+    this.refreshBeforeMutation();
     const active = this.mutableActiveSession(senderId);
     if (active) {
       return structuredClone(active);
@@ -257,6 +315,7 @@ export class RuntimeStateStore {
   }
 
   createSession(senderId: string, workspace: string, title?: string): ManagedSession {
+    this.refreshBeforeMutation();
     const now = new Date().toISOString();
     const number = this.state.sessions.filter((session) => session.senderId === senderId).length + 1;
     const id = crypto.randomUUID();
@@ -295,6 +354,7 @@ export class RuntimeStateStore {
   }
 
   setSessionPromptPreview(sessionId: string, preview: string): ManagedSession {
+    this.refreshBeforeMutation();
     const session = this.mutableSession(sessionId);
     const normalized = cleanPromptPreview(preview);
     if (normalized) session.lastPromptPreview = normalized;
@@ -304,6 +364,7 @@ export class RuntimeStateStore {
   }
 
   renameSession(sessionId: string, title: string): ManagedSession {
+    this.refreshBeforeMutation();
     const session = this.mutableSession(sessionId);
     const nextTitle = cleanTitle(title);
     if (!nextTitle) {
@@ -316,6 +377,7 @@ export class RuntimeStateStore {
   }
 
   activateSession(sessionId: string): ManagedSession {
+    this.refreshBeforeMutation();
     const session = this.mutableSession(sessionId);
     this.state.activeSessionIds[session.senderId] = session.id;
     session.updatedAt = new Date().toISOString();
@@ -324,6 +386,7 @@ export class RuntimeStateStore {
   }
 
   resetSession(sessionId: string): ManagedSession {
+    this.refreshBeforeMutation();
     const session = this.mutableSession(sessionId);
     delete session.threadId;
     session.updatedAt = new Date().toISOString();
@@ -332,6 +395,7 @@ export class RuntimeStateStore {
   }
 
   setSessionThread(sessionId: string, threadId: string): ManagedSession {
+    this.refreshBeforeMutation();
     const session = this.mutableSession(sessionId);
     if (threadId) {
       session.threadId = threadId;
@@ -348,7 +412,8 @@ export class RuntimeStateStore {
     outputTokens: number;
     totalTokens: number;
     cachedInputTokens: number;
-  } | undefined, threadId?: string): ManagedSession {
+  } | undefined, threadId?: string, model?: string): ManagedSession {
+    this.refreshBeforeMutation();
     const session = this.mutableSession(sessionId);
     if (!usage) return structuredClone(session);
     const at = new Date().toISOString();
@@ -363,7 +428,7 @@ export class RuntimeStateStore {
     };
     session.tokenUsageRecords = [
       ...(session.tokenUsageRecords ?? []),
-      { at, ...(threadId ? { threadId } : {}), ...usage }
+      { at, ...(threadId ? { threadId } : {}), ...(model?.trim() ? { model: model.trim() } : {}), ...usage }
     ].slice(-1_000);
     session.updatedAt = at;
     this.save();
@@ -371,6 +436,7 @@ export class RuntimeStateStore {
   }
 
   updateSessionRuntime(sessionId: string, overrides: SessionRuntimeOverrides): ManagedSession {
+    this.refreshBeforeMutation();
     const session = this.mutableSession(sessionId);
     if (Object.hasOwn(overrides, "model")) {
       const model = overrides.model?.trim();
@@ -392,6 +458,7 @@ export class RuntimeStateStore {
   }
 
   deleteSession(sessionId: string): void {
+    this.refreshBeforeMutation();
     const session = this.mutableSession(sessionId);
     this.state.sessions = this.state.sessions.filter((candidate) => candidate.id !== sessionId);
     if (this.state.activeSessionIds[session.senderId] === sessionId) {

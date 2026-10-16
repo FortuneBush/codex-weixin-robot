@@ -16,6 +16,53 @@ import {
   sendLocalMediaFile
 } from "../src/weixin/media.js";
 
+test("rejects outbound media outside the configured workspace roots", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-media-roots-"));
+  const outside = path.join(os.tmpdir(), `codex-weixin-media-outside-${Date.now()}.txt`);
+  t.after(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(outside, { force: true });
+  });
+  fs.writeFileSync(outside, "do not send");
+
+  await assert.rejects(sendLocalMediaFile({
+    client: {
+      async getUploadUrl() { throw new Error("should not upload"); },
+      async sendFileMessage() { throw new Error("should not send"); },
+      async sendImageMessage() { throw new Error("should not send"); },
+      async sendVideoMessage() { throw new Error("should not send"); }
+    },
+    toUserId: "alice@im.wechat",
+    filePath: outside,
+    allowedRoots: [root]
+  }), /outside the allowed workspace or inbound directories/i);
+});
+
+test("aborts a stalled CDN download at the media request timeout", async (t) => {
+  const key = crypto.randomBytes(16);
+  const aesKeyBase64 = Buffer.from(key.toString("hex"), "utf8").toString("base64");
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-media-timeout-"));
+  t.after(() => fs.rmSync(rootDir, { recursive: true, force: true }));
+  await assert.rejects(downloadInboundAttachments({
+    rootDir,
+    senderId: "alice@im.wechat",
+    messageId: "timeout-1",
+    attachments: [{
+      kind: "image",
+      label: "image",
+      item: { type: 2, image_item: { media: { encrypt_query_param: "token", aes_key: aesKeyBase64 } } }
+    }],
+    maxBytes: 1024,
+    timeoutMs: 5,
+    fetch: async (_url, init) => await new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+    })
+  }), (error) => {
+    assert.equal((error as Error).name, "MediaRequestTimeoutError");
+    return true;
+  });
+});
+
 test("encrypts and decrypts WeChat CDN AES-128-ECB payloads", () => {
   const key = crypto.randomBytes(16);
   const plaintext = Buffer.from("hello weixin media");

@@ -161,12 +161,15 @@
         <article class="usage-stat usage-kpi usage-kpi-output"><div class="usage-kpi-label"><span>Output Token</span><i data-lucide="arrow-up-from-line"></i></div><strong id="usageOutput">0</strong><small>模型生成内容</small></article>
         <article class="usage-stat usage-kpi usage-kpi-cache"><div class="usage-kpi-label"><span>Cache Hit Rate</span><i data-lucide="zap"></i></div><strong id="usageCacheRate">--</strong><small id="usageCacheDetail">缓存输入 / 输入 Token</small></article>
         <article class="usage-stat usage-kpi usage-kpi-turns"><div class="usage-kpi-label"><span>请求轮数</span><i data-lucide="repeat-2"></i></div><strong id="usageTurns">0</strong><small id="usageAvgTurn">平均每轮 0 Token</small></article>
+        <article class="usage-stat usage-kpi usage-kpi-cost"><div class="usage-kpi-label"><span>估算成本</span><i data-lucide="badge-dollar-sign"></i></div><strong id="usageCost">--</strong><small id="usageCostDetail">请先配置模型价格</small></article>
       </div>
 
       <section class="usage-filter-bar" aria-label="Token 统计筛选条件">
         <div class="usage-filter-heading"><i data-lucide="filter"></i><strong>筛选数据</strong><span>选择账号或会话后，指标、趋势、排行和请求明细会同步更新</span></div>
         <label><span>微信账号</span><select id="usageAccountFilter"><option value="">全部账号</option></select></label>
         <label><span>会话</span><select id="usageSessionFilter"><option value="">全部会话</option></select></label>
+        <label><span>开始日期（UTC）</span><input id="usageFrom" type="date"></label>
+        <label><span>结束日期（UTC）</span><input id="usageTo" type="date"></label>
         <label><span>排序方式</span><select id="usageSortFilter"><option value="total">累计 Token</option><option value="input">Input Token</option><option value="output">Output Token</option><option value="cache">Cache Hit Rate</option><option value="recent">最近使用</option></select></label>
         <label><span>每页数量</span><select id="usagePageSize"><option value="5">5 条</option><option value="10" selected>10 条</option><option value="20">20 条</option></select></label>
         <button class="button button-secondary usage-filter-reset" id="usageResetFilters" type="button"><i data-lucide="rotate-ccw"></i><span>重置</span></button>
@@ -258,14 +261,19 @@
               </select>
               <small class="field-hint effective-setting"><span>当前生效</span><strong id="effectiveModelValue">正在读取</strong></small>
             </label>
-            <label>
-              <span>推理强度</span>
+          <label>
+            <span>推理强度</span>
               <select id="effortInput" name="effort">
                 <option value="">沿用模型默认</option>
               </select>
               <small class="field-hint effective-setting"><span>当前生效</span><strong id="effectiveEffortValue">正在读取</strong></small>
-            </label>
-            <label class="toggle-field" for="streamRepliesInput">
+          </label>
+          <label class="settings-wide">
+            <span>模型价格（USD / 1M Token）</span>
+            <textarea id="modelPricingInput" rows="7" spellcheck="false" placeholder='{"gpt-5*":{"inputPerMillionUsd":1,"outputPerMillionUsd":5,"cachedInputPerMillionUsd":0.25}}'></textarea>
+            <small class="field-hint">支持精确模型名、以 * 结尾的前缀和 * 默认价格。缓存输入未配置单独价格时沿用 Input 价格。</small>
+          </label>
+          <label class="toggle-field" for="streamRepliesInput">
               <span>过程进度</span>
               <span class="toggle-control">
                 <input id="streamRepliesInput" name="streamReplies" type="checkbox">

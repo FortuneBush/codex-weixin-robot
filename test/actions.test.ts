@@ -1,7 +1,30 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
 import test from "node:test";
+import path from "node:path";
 
-import { parseActionBlocks } from "../src/bridge/actions.js";
+import { assertPathWithinAllowedRoots, isPathWithinAllowedRoots, parseActionBlocks } from "../src/bridge/actions.js";
+
+test("allows outbound actions only for existing files below an allowed root", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-actions-"));
+  const filePath = path.join(root, "report.pdf");
+  const outside = path.join(os.tmpdir(), `codex-weixin-outside-${Date.now()}.pdf`);
+  fs.writeFileSync(filePath, "report");
+  fs.writeFileSync(outside, "outside");
+  try {
+    assert.equal(isPathWithinAllowedRoots(filePath, [root]), true);
+    assert.equal(isPathWithinAllowedRoots(outside, [root]), false);
+    assert.doesNotThrow(() => assertPathWithinAllowedRoots(filePath, [root]));
+    assert.throws(
+      () => assertPathWithinAllowedRoots(outside, [root]),
+      /outside the allowed workspace or inbound directories/i
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(outside, { force: true });
+  }
+});
 
 test("parses explicit codex-weixin action blocks and ignores prose paths", () => {
   const text = [

@@ -9,14 +9,18 @@ export type MonitorOptions = {
   initialSyncKey?: string;
   onSyncKey?: (syncKey: string) => Promise<void> | void;
   claimMessage?: (message: NormalizedWeixinMessage) => boolean;
+  completeMessage?: (message: NormalizedWeixinMessage) => void;
+  releaseMessage?: (message: NormalizedWeixinMessage) => void;
   onMessage: (message: NormalizedWeixinMessage) => Promise<void>;
   onMessageError?: (error: unknown, message: NormalizedWeixinMessage) => Promise<void> | void;
+  onPollError?: (error: unknown) => void;
+  onPollSuccess?: () => void;
 };
 
 // File uploads can take several seconds to appear in getUpdates after the
 // accompanying text. Keep likely attachment instructions pending long enough
 // to join that delayed update without holding ordinary text messages.
-const ATTACHMENT_PAIR_WINDOW_MS = 30_000;
+const ATTACHMENT_PAIR_WINDOW_MS = 5_000;
 
 export class PollRetryBackoff {
   private readonly initialMs: number;
@@ -47,6 +51,9 @@ export async function monitorWeixin(options: MonitorOptions): Promise<void> {
   const pendingPairs = new Map<string, { message: NormalizedWeixinMessage; timer: NodeJS.Timeout }>();
   const activeHandlers = new Set<Promise<void>>();
   const senderChains = new Map<string, Promise<void>>();
+  let lastPollErrorText = "";
+  let lastPollErrorLoggedAt = 0;
+  let suppressedPollErrors = 0;
 
   const reportError = async (error: unknown, message: NormalizedWeixinMessage): Promise<void> => {
     console.error(`[codex-weixin] message handling failed for ${message.senderId}: ${errorDetail(error)}`);
@@ -57,15 +64,47 @@ export async function monitorWeixin(options: MonitorOptions): Promise<void> {
     }
   };
 
+  const isControlMessage = (message: NormalizedWeixinMessage): boolean =>
+    /^\/(?:stop|status|where)\b/iu.test(message.text.trim());
+
+  const sourceIds = (message: NormalizedWeixinMessage): string[] =>
+    message.sourceIds?.length ? message.sourceIds : [message.id];
+
   const dispatch = (message: NormalizedWeixinMessage): void => {
-    const previous = senderChains.get(message.senderId) ?? Promise.resolve();
+    // Control commands must be able to interrupt or inspect a long-running
+    // turn instead of waiting behind the sender's normal work queue.
+    const previous = isControlMessage(message)
+      ? Promise.resolve()
+      : senderChains.get(message.senderId) ?? Promise.resolve();
     let task: Promise<void>;
     task = previous
       .catch(() => {})
       .then(async () => {
+        const claimed: string[] = [];
+        for (const id of sourceIds(message)) {
+          const candidate = { ...message, id, sourceIds: [id] };
+          if (options.claimMessage && !options.claimMessage(candidate)) {
+            for (const claimedId of claimed) {
+              options.releaseMessage?.({ ...message, id: claimedId, sourceIds: [claimedId] });
+            }
+            console.log(`[codex-weixin] skipped duplicate message ${id} from ${message.senderId}`);
+            return;
+          }
+          claimed.push(id);
+        }
         console.log(`[codex-weixin] handling message ${message.id} from ${message.senderId}`);
-        await options.onMessage(message);
-        console.log(`[codex-weixin] handled message ${message.id} from ${message.senderId}`);
+        try {
+          await options.onMessage(message);
+          for (const id of claimed) {
+            options.completeMessage?.({ ...message, id, sourceIds: [id] });
+          }
+          console.log(`[codex-weixin] handled message ${message.id} from ${message.senderId}`);
+        } catch (error) {
+          for (const id of claimed) {
+            options.releaseMessage?.({ ...message, id, sourceIds: [id] });
+          }
+          throw error;
+        }
       })
       .catch((error) => reportError(error, message))
       .finally(() => {
@@ -74,7 +113,7 @@ export async function monitorWeixin(options: MonitorOptions): Promise<void> {
           senderChains.delete(message.senderId);
         }
       });
-    senderChains.set(message.senderId, task);
+    if (!isControlMessage(message)) senderChains.set(message.senderId, task);
     activeHandlers.add(task);
   };
 
@@ -112,11 +151,23 @@ export async function monitorWeixin(options: MonitorOptions): Promise<void> {
         await options.onSyncKey?.(syncKey);
       }
     } catch (error) {
+      options.onPollError?.(error);
       const retryMs = retryBackoff.next();
-      console.error(`[codex-weixin] monitor poll failed; retrying in ${retryMs}ms: ${errorDetail(error)}`);
+      const detail = errorDetail(error);
+      const now = Date.now();
+      if (detail !== lastPollErrorText || now - lastPollErrorLoggedAt >= 30_000) {
+        const suffix = suppressedPollErrors ? `; suppressed ${suppressedPollErrors} repeats` : "";
+        console.error(`[codex-weixin] monitor poll failed; retrying in ${retryMs}ms: ${detail}${suffix}`);
+        lastPollErrorText = detail;
+        lastPollErrorLoggedAt = now;
+        suppressedPollErrors = 0;
+      } else {
+        suppressedPollErrors += 1;
+      }
       await delay(retryMs, options.signal);
       continue;
     }
+    options.onPollSuccess?.();
     retryBackoff.reset();
     const { messages } = batch;
     if (messages.length) {
@@ -132,10 +183,6 @@ export async function monitorWeixin(options: MonitorOptions): Promise<void> {
         continue;
       }
       if (!normalized) {
-        continue;
-      }
-      if (options.claimMessage && !options.claimMessage(normalized)) {
-        console.log(`[codex-weixin] skipped duplicate message ${normalized.id} from ${normalized.senderId}`);
         continue;
       }
       normalizedMessages.push(normalized);
@@ -182,6 +229,10 @@ function mergeAttachmentMessages(first: NormalizedWeixinMessage, second: Normali
   const textMessage = first.attachments.length > 0 ? second : first;
   return {
     ...attachmentMessage,
+    sourceIds: [
+      ...(first.sourceIds?.length ? first.sourceIds : [first.id]),
+      ...(second.sourceIds?.length ? second.sourceIds : [second.id])
+    ],
     contextToken: second.contextToken ?? first.contextToken,
     text: textMessage.text.trim(),
     raw: textMessage.raw

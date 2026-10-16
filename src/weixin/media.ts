@@ -6,6 +6,7 @@ import type { FetchLike, WeixinApiClient } from "./api.js";
 import type { WeixinInboundAttachment } from "./messages.js";
 
 const DEFAULT_WEIXIN_CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c";
+const DEFAULT_MEDIA_REQUEST_TIMEOUT_MS = 30_000;
 const UPLOAD_MEDIA_TYPE = {
   image: 1,
   video: 2,
@@ -87,6 +88,16 @@ export class InboundMediaTooLargeError extends Error {
   }
 }
 
+export class MediaRequestTimeoutError extends Error {
+  readonly timeoutMs: number;
+
+  constructor(operation: string, timeoutMs: number) {
+    super(`${operation} timed out after ${timeoutMs} ms`);
+    this.name = "MediaRequestTimeoutError";
+    this.timeoutMs = timeoutMs;
+  }
+}
+
 export async function downloadInboundAttachments(input: {
   rootDir: string;
   senderId: string;
@@ -94,6 +105,8 @@ export async function downloadInboundAttachments(input: {
   attachments: WeixinInboundAttachment[];
   maxBytes: number;
   fetch?: FetchLike;
+  signal?: AbortSignal;
+  timeoutMs?: number;
 }): Promise<DownloadedInboundAttachment[]> {
   const downloaded: DownloadedInboundAttachment[] = [];
   for (const [index, attachment] of input.attachments.entries()) {
@@ -103,7 +116,9 @@ export async function downloadInboundAttachments(input: {
       messageId: `${input.messageId}-${index + 1}`,
       attachment,
       maxBytes: input.maxBytes,
-      fetch: input.fetch
+      fetch: input.fetch,
+      signal: input.signal,
+      timeoutMs: input.timeoutMs
     }));
   }
   return downloaded;
@@ -116,6 +131,8 @@ async function downloadInboundAttachment(input: {
   attachment: WeixinInboundAttachment;
   maxBytes: number;
   fetch?: FetchLike;
+  signal?: AbortSignal;
+  timeoutMs?: number;
 }): Promise<DownloadedInboundAttachment> {
   const ref = inboundMediaRef(input.attachment);
   const key = inboundAesKey(ref);
@@ -123,7 +140,9 @@ async function downloadInboundAttachment(input: {
     url: ref.fullUrl ?? downloadUrlFromParam(ref.encryptQueryParam),
     maxBytes: key ? aesEcbPaddedSize(input.maxBytes) : input.maxBytes,
     plainMaxBytes: input.maxBytes,
-    fetch: input.fetch
+    fetch: input.fetch,
+    signal: input.signal,
+    timeoutMs: input.timeoutMs
   });
   const plaintext = key ? decryptAesEcb(encrypted, key) : encrypted;
   if (plaintext.length > input.maxBytes) {
@@ -176,20 +195,32 @@ async function downloadMediaBuffer(input: {
   maxBytes: number;
   plainMaxBytes: number;
   fetch?: FetchLike;
+  signal?: AbortSignal;
+  timeoutMs?: number;
 }): Promise<Buffer> {
-  const response = await (input.fetch ?? globalThis.fetch.bind(globalThis))(input.url);
-  if (!response.ok) {
-    throw new Error(`CDN download failed: ${response.status} ${response.statusText}`);
+  const timeout = createRequestSignal(input.signal, input.timeoutMs ?? DEFAULT_MEDIA_REQUEST_TIMEOUT_MS);
+  try {
+    const response = await (input.fetch ?? globalThis.fetch.bind(globalThis))(input.url, { signal: timeout.signal });
+    if (!response.ok) {
+      throw new Error(`CDN download failed: ${response.status} ${response.statusText}`);
+    }
+    const contentLength = response.headers.get("content-length");
+    if (contentLength && Number(contentLength) > input.maxBytes) {
+      throw new InboundMediaTooLargeError(input.plainMaxBytes, Number(contentLength));
+    }
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (buffer.length > input.maxBytes) {
+      throw new InboundMediaTooLargeError(input.plainMaxBytes, buffer.length);
+    }
+    return buffer;
+  } catch (error) {
+    if (timeout.didTimeout) {
+      throw new MediaRequestTimeoutError("CDN download", timeout.timeoutMs);
+    }
+    throw error;
+  } finally {
+    timeout.cleanup();
   }
-  const contentLength = response.headers.get("content-length");
-  if (contentLength && Number(contentLength) > input.maxBytes) {
-    throw new InboundMediaTooLargeError(input.plainMaxBytes, Number(contentLength));
-  }
-  const buffer = Buffer.from(await response.arrayBuffer());
-  if (buffer.length > input.maxBytes) {
-    throw new InboundMediaTooLargeError(input.plainMaxBytes, buffer.length);
-  }
-  return buffer;
 }
 
 function downloadUrlFromParam(encryptQueryParam?: string): string {
@@ -261,7 +292,16 @@ export async function sendLocalMediaFile(input: {
   filePath: string;
   kind?: "image" | "file" | "video";
   fetch?: FetchLike;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  allowedRoots?: readonly string[];
 }): Promise<{ messageId: string; kind: "image" | "file" | "video" }> {
+  if (!isAbsoluteLocalPath(input.filePath)) {
+    throw new Error(`Outbound media path must be absolute: ${input.filePath}`);
+  }
+  if (input.allowedRoots && !isPathWithinAllowedRoots(input.filePath, input.allowedRoots)) {
+    throw new Error("Outbound media path is outside the allowed workspace or inbound directories");
+  }
   const plaintext = fs.readFileSync(input.filePath);
   const rawSize = plaintext.length;
   const rawFileMd5 = crypto.createHash("md5").update(plaintext).digest("hex");
@@ -288,7 +328,9 @@ export async function sendLocalMediaFile(input: {
     fileKey,
     uploadFullUrl: uploadUrl.uploadFullUrl,
     uploadParam: uploadUrl.uploadParam,
-    fetch: input.fetch
+    fetch: input.fetch,
+    signal: input.signal,
+    timeoutMs: input.timeoutMs
   });
   const aesKeyBase64 = Buffer.from(aesKeyHex, "utf8").toString("base64");
 
@@ -332,21 +374,97 @@ async function uploadBufferToCdn(input: {
   uploadFullUrl?: string;
   uploadParam?: string;
   fetch?: FetchLike;
+  signal?: AbortSignal;
+  timeoutMs?: number;
 }): Promise<string> {
   const ciphertext = encryptAesEcb(input.plaintext, input.aesKey);
-  const response = await (input.fetch ?? globalThis.fetch.bind(globalThis))(resolveUploadUrl(input), {
-    method: "POST",
-    headers: { "Content-Type": "application/octet-stream" },
-    body: new Uint8Array(ciphertext)
+  const timeout = createRequestSignal(input.signal, input.timeoutMs ?? DEFAULT_MEDIA_REQUEST_TIMEOUT_MS);
+  try {
+    const response = await (input.fetch ?? globalThis.fetch.bind(globalThis))(resolveUploadUrl(input), {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: new Uint8Array(ciphertext),
+      signal: timeout.signal
+    });
+    if (!response.ok) {
+      throw new Error(`CDN upload failed: ${response.status} ${response.statusText}`);
+    }
+    const encryptedParam = response.headers.get("x-encrypted-query-param") ?? response.headers.get("x-encrypted-param");
+    if (!encryptedParam) {
+      throw new Error("CDN upload response missing encrypted query param header");
+    }
+    return encryptedParam;
+  } catch (error) {
+    if (timeout.didTimeout) {
+      throw new MediaRequestTimeoutError("CDN upload", timeout.timeoutMs);
+    }
+    throw error;
+  } finally {
+    timeout.cleanup();
+  }
+}
+
+function isAbsoluteLocalPath(value: string): boolean {
+  return path.isAbsolute(value) || /^[a-zA-Z]:[\\/]/.test(value) || /^\\\\/.test(value);
+}
+
+function isPathWithinAllowedRoots(filePath: string, roots: readonly string[]): boolean {
+  if (!roots.length) return false;
+  const resolvedFile = path.resolve(filePath);
+  if (!roots.some((root) => isPathWithinRoot(resolvedFile, path.resolve(root)))) return false;
+  let realFile: string;
+  try {
+    realFile = fs.realpathSync.native(resolvedFile);
+  } catch {
+    return false;
+  }
+  return roots.some((root) => {
+    try {
+      return isPathWithinRoot(realFile, fs.realpathSync.native(path.resolve(root)));
+    } catch {
+      return false;
+    }
   });
-  if (!response.ok) {
-    throw new Error(`CDN upload failed: ${response.status} ${response.statusText}`);
+}
+
+function isPathWithinRoot(filePath: string, root: string): boolean {
+  const relative = path.relative(root, filePath);
+  return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+function createRequestSignal(inputSignal: AbortSignal | undefined, timeoutMs: number): {
+  signal?: AbortSignal;
+  didTimeout: boolean;
+  timeoutMs: number;
+  cleanup: () => void;
+} {
+  const normalizedTimeout = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 0;
+  if (!normalizedTimeout) {
+    return { signal: inputSignal, didTimeout: false, timeoutMs: 0, cleanup: () => undefined };
   }
-  const encryptedParam = response.headers.get("x-encrypted-query-param") ?? response.headers.get("x-encrypted-param");
-  if (!encryptedParam) {
-    throw new Error("CDN upload response missing encrypted query param header");
+  const controller = new AbortController();
+  let didTimeout = false;
+  const timer = setTimeout(() => {
+    didTimeout = true;
+    controller.abort();
+  }, normalizedTimeout);
+  let onAbort: (() => void) | undefined;
+  if (inputSignal) {
+    onAbort = () => controller.abort(inputSignal.reason);
+    if (inputSignal.aborted) onAbort();
+    else inputSignal.addEventListener("abort", onAbort, { once: true });
   }
-  return encryptedParam;
+  return {
+    signal: controller.signal,
+    get didTimeout() {
+      return didTimeout;
+    },
+    timeoutMs: normalizedTimeout,
+    cleanup: () => {
+      clearTimeout(timer);
+      if (inputSignal && onAbort) inputSignal.removeEventListener("abort", onAbort);
+    }
+  };
 }
 
 function resolveUploadUrl(input: {

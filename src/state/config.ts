@@ -2,6 +2,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { parseCodexExecSandbox, type CodexExecSandbox } from "../codex/sandbox.js";
+import { normalizeModelPricing, type ModelPricingTable } from "../codex/pricing.js";
 import { readJsonFile, writeJsonFile } from "./json-store.js";
 import type { StatePaths } from "./paths.js";
 
@@ -23,6 +24,8 @@ export type CodexWeixinConfig = {
   sessionWorkspaceRoot?: string;
   model?: string;
   effort?: string;
+  /** Per-model token prices in USD per one million tokens. */
+  modelPricing: ModelPricingTable;
   streamReplies: boolean;
   maxBufferItems: number;
   promptBufferTtlMs: number;
@@ -37,6 +40,7 @@ export function defaultConfig(cwd = path.join(os.homedir(), ".codex-weixin")): C
     codexBin: "codex",
     codexBackend: "auto",
     codexTimeoutMs: DEFAULT_CODEX_TIMEOUT_MS,
+    modelPricing: {},
     streamReplies: true,
     maxBufferItems: 50,
     promptBufferTtlMs: 10 * 60_000,
@@ -54,6 +58,7 @@ export function loadConfig(paths: StatePaths, cwd?: string): CodexWeixinConfig {
     codexExecSandbox,
     codexTimeoutMs: normalizeCodexTimeout(loaded.codexTimeoutMs, base.codexTimeoutMs),
     streamReplies: typeof loaded.streamReplies === "boolean" ? loaded.streamReplies : base.streamReplies,
+    modelPricing: normalizeModelPricing(loaded.modelPricing, base.modelPricing),
     maxInboundBytes: normalizeInboundBytes(loaded.maxInboundBytes, base.maxInboundBytes),
     allowedSenderIds: loaded.allowedSenderIds ?? base.allowedSenderIds,
     allowedWorkspaces: (loaded.allowedWorkspaces?.length ? loaded.allowedWorkspaces : base.allowedWorkspaces)
@@ -70,6 +75,7 @@ function normalizeCodexTimeout(value: unknown, fallback: number | null): number 
 export function saveConfig(paths: StatePaths, config: CodexWeixinConfig): void {
   writeJsonFile(paths.configPath, {
     ...config,
+    modelPricing: normalizeModelPricing(config.modelPricing),
     maxInboundBytes: normalizeInboundBytes(config.maxInboundBytes, MAX_INBOUND_BYTES)
   });
 }

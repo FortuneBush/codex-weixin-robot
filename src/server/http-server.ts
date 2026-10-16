@@ -9,10 +9,11 @@ import { promisify } from "node:util";
 import { z } from "zod";
 
 import { resolveCodexCommand } from "../codex/exec-runner.js";
+import { calculateTokenCost } from "../codex/pricing.js";
 import { loadConfig, saveConfig } from "../state/config.js";
 import type { StatePaths } from "../state/paths.js";
 import type { CodexModelOption, CodexRuntimeInfo } from "../codex/app-server-runner.js";
-import type { AccountManager, SessionAttachmentFile, SessionHistoryMessage, SessionUpload } from "./account-manager.js";
+import type { AccountManager, AccountSession, SessionAttachmentFile, SessionHistoryMessage, SessionUpload } from "./account-manager.js";
 import { LoginManager } from "./login-manager.js";
 import { UpdateManager, type UpdateService } from "./update-manager.js";
 
@@ -28,6 +29,43 @@ type UsageNumbers = {
 type UsageMetrics = UsageNumbers & {
   /** Ratio of cached input tokens to all input tokens, in the range 0..1. */
   cacheHitRate: number;
+  estimatedCostUsd?: number;
+};
+
+type UsageRecordView = {
+  at: string;
+  threadId?: string;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  cachedInputTokens: number;
+  cacheHitRate: number;
+  accountId: string;
+  sessionId: string;
+  title: string;
+  model?: string;
+  estimatedCostUsd?: number;
+};
+
+type UsageSessionView = {
+  accountId: string;
+  sessionId: string;
+  title: string;
+  workspace: string;
+  usage: UsageMetrics;
+  records: Array<Omit<UsageRecordView, "accountId" | "sessionId" | "title">>;
+};
+
+type UsageQuery = {
+  accountId?: string;
+  sessionId?: string;
+  sort: "total" | "input" | "output" | "cache" | "recent";
+  sessionPage: number;
+  recentPage: number;
+  pageSize: number;
+  recentPageSize: number;
+  from?: string;
+  to?: string;
 };
 
 const bodySchema = z.record(z.string(), z.unknown());
@@ -51,6 +89,11 @@ const configSchema = z.object({
   codexTimeoutMs: z.number().int().min(60_000).max(86_400_000).nullable().optional(),
   model: z.string().optional(),
   effort: z.string().optional(),
+  modelPricing: z.record(z.string().min(1).max(200), z.object({
+    inputPerMillionUsd: z.number().finite().min(0).max(1_000_000),
+    outputPerMillionUsd: z.number().finite().min(0).max(1_000_000),
+    cachedInputPerMillionUsd: z.number().finite().min(0).max(1_000_000).optional()
+  })).optional(),
   streamReplies: z.boolean().optional()
 });
 const MAX_WEB_UPLOAD_FILES = 10;
@@ -160,7 +203,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
       codexRuntime,
       codexModels,
       accounts: context.accountManager.listAccounts(),
-      sessions: context.accountManager.listSessions()
+      sessions: publicSessionSummaries(context.accountManager.listSessions())
     });
     return;
   }
@@ -196,66 +239,16 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
     return;
   }
   if (method === "GET" && url.pathname === "/api/sessions") {
-    sendJson(response, 200, { sessions: context.accountManager.listSessions() });
+    sendJson(response, 200, { sessions: publicSessionSummaries(context.accountManager.listSessions()) });
     return;
   }
   if (method === "GET" && url.pathname === "/api/usage") {
-    const sessions = context.accountManager.listSessions();
-    const usageSessions = sessions.filter((session) => session.tokenUsage);
-    const totals = withCacheHitRate(usageSessions.reduce((sum, session) => {
-      const usage = session.tokenUsage;
-      if (!usage) return sum;
-      sum.inputTokens += finiteUsageNumber(usage.inputTokens);
-      sum.outputTokens += finiteUsageNumber(usage.outputTokens);
-      sum.totalTokens += finiteUsageNumber(usage.totalTokens);
-      sum.cachedInputTokens += finiteUsageNumber(usage.cachedInputTokens);
-      sum.turnCount += finiteUsageNumber(usage.turnCount);
-      return sum;
-    }, emptyUsageNumbers()));
-
-    // Keep a compact time series alongside the session breakdown so clients can
-    // render trend charts without having to duplicate aggregation logic. The
-    // bucket key is the ISO calendar date, making it deterministic across hosts.
-    const timeline = new Map<string, UsageNumbers>();
-    for (const session of usageSessions) {
-      for (const record of session.tokenUsageRecords ?? []) {
-        const date = typeof record.at === "string" ? record.at.slice(0, 10) : "";
-        if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
-        const bucket = timeline.get(date) ?? emptyUsageNumbers();
-        bucket.inputTokens += finiteUsageNumber(record.inputTokens);
-        bucket.outputTokens += finiteUsageNumber(record.outputTokens);
-        bucket.totalTokens += finiteUsageNumber(record.totalTokens);
-        bucket.cachedInputTokens += finiteUsageNumber(record.cachedInputTokens);
-        bucket.turnCount += 1;
-        timeline.set(date, bucket);
-      }
-    }
-
-    sendJson(response, 200, {
-      totals,
-      timeline: [...timeline.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([date, usage]) => ({
-        date,
-        ...withCacheHitRate(usage)
-      })),
-      sessions: usageSessions.map((session) => ({
-        accountId: session.accountId,
-        sessionId: session.id,
-        title: session.title,
-        workspace: session.workspace,
-        usage: withCacheHitRate({
-          inputTokens: session.tokenUsage!.inputTokens,
-          outputTokens: session.tokenUsage!.outputTokens,
-          totalTokens: session.tokenUsage!.totalTokens,
-          cachedInputTokens: session.tokenUsage!.cachedInputTokens,
-          turnCount: session.tokenUsage!.turnCount,
-          lastUsedAt: session.tokenUsage!.lastUsedAt
-        }),
-        records: (session.tokenUsageRecords ?? []).map((record) => ({
-          ...record,
-          cacheHitRate: cacheHitRate(record.inputTokens, record.cachedInputTokens)
-        }))
-      }))
-    });
+    const config = loadConfig(context.paths);
+    sendJson(response, 200, buildUsageResponse(
+      context.accountManager.listSessions(),
+      url.searchParams,
+      config.modelPricing
+    ));
     return;
   }
   if (method === "POST" && url.pathname === "/api/logins") {
@@ -430,7 +423,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
     const current = loadConfig(context.paths);
     const defaultCwd = path.resolve(input.defaultCwd);
     const allowedWorkspaces = [...new Set([...input.allowedWorkspaces.map((workspace) => path.resolve(workspace)), defaultCwd])];
-    saveConfig(context.paths, {
+    const nextConfig = {
       ...current,
       ...input,
       defaultCwd,
@@ -438,9 +431,20 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
       codexExecSandbox: input.codexExecSandbox ?? undefined,
       codexTimeoutMs: input.codexTimeoutMs !== undefined ? input.codexTimeoutMs : current.codexTimeoutMs,
       model: optionalString(input.model),
-      effort: optionalString(input.effort)
-    });
-    await context.accountManager.restartRunning();
+      effort: optionalString(input.effort),
+      modelPricing: input.modelPricing ?? current.modelPricing
+    };
+    const runtimeChanged = current.defaultCwd !== nextConfig.defaultCwd
+      || current.codexBackend !== nextConfig.codexBackend
+      || current.codexExecSandbox !== nextConfig.codexExecSandbox
+      || current.codexTimeoutMs !== nextConfig.codexTimeoutMs
+      || current.model !== nextConfig.model
+      || current.effort !== nextConfig.effort
+      || current.streamReplies !== nextConfig.streamReplies
+      || current.allowedWorkspaces.length !== nextConfig.allowedWorkspaces.length
+      || current.allowedWorkspaces.some((workspace, index) => workspace !== nextConfig.allowedWorkspaces[index]);
+    saveConfig(context.paths, nextConfig);
+    if (runtimeChanged) await context.accountManager.restartRunning();
     sendJson(response, 200, {
       config: loadConfig(context.paths),
       codexRuntime: await readCodexRuntime(context),
@@ -454,6 +458,275 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
     return;
   }
   sendJson(response, 404, { error: "Not found" });
+}
+
+/**
+ * Build the usage dashboard response on the server. Keeping filtering,
+ * aggregation and pagination here prevents the browser from downloading every
+ * session and every request record on each refresh.
+ */
+function buildUsageResponse(
+  sessions: AccountSession[],
+  searchParams: URLSearchParams,
+  modelPricing: import("../codex/pricing.js").ModelPricingTable = {}
+): {
+  totals: UsageMetrics;
+  timeline: Array<{ date: string } & UsageMetrics>;
+  sessions: Array<Omit<UsageSessionView, "records">>;
+  recent: Array<UsageRecordView & { session: { accountId: string; sessionId: string; title: string } }>;
+  pagination: {
+    sessions: UsagePagination;
+    recent: UsagePagination;
+  };
+  filters: Omit<UsageQuery, "sessionPage" | "recentPage" | "pageSize" | "recentPageSize"> & {
+    sessionPage: number;
+    recentPage: number;
+    pageSize: number;
+    recentPageSize: number;
+  };
+} {
+  const query = parseUsageQuery(searchParams);
+  const candidates = sessions
+    .filter((session) => !query.accountId || session.accountId === query.accountId)
+    .filter((session) => !query.sessionId || session.id === query.sessionId);
+  const views = candidates.flatMap((session): UsageSessionView[] => {
+    const sourceRecords = session.tokenUsageRecords ?? [];
+    const records = sourceRecords
+      .filter((record) => usageDateInRange(record.at, query.from, query.to))
+      .map((record) => ({
+        at: record.at,
+        ...(record.threadId ? { threadId: record.threadId } : {}),
+        ...(record.model ? { model: record.model } : {}),
+        inputTokens: finiteUsageNumber(record.inputTokens),
+        outputTokens: finiteUsageNumber(record.outputTokens),
+        totalTokens: finiteUsageNumber(record.totalTokens),
+        cachedInputTokens: finiteUsageNumber(record.cachedInputTokens),
+        cacheHitRate: cacheHitRate(record.inputTokens, record.cachedInputTokens),
+        ...(() => {
+          const cost = calculateTokenCost(record, record.model ?? session.model, modelPricing);
+          return cost ? { estimatedCostUsd: cost.totalCostUsd } : {};
+        })()
+      }));
+    const estimatedCostUsd = records.some((record) => record.estimatedCostUsd !== undefined)
+      ? records.reduce((sum, record) => sum + (record.estimatedCostUsd ?? 0), 0)
+      : undefined;
+    if (!records.length && (!session.tokenUsage || finiteUsageNumber(session.tokenUsage.totalTokens) <= 0)) {
+      return [];
+    }
+
+    let usage: UsageMetrics;
+    if (query.from || query.to) {
+      if (!records.length) return [];
+      usage = withCacheHitRate(records.reduce((sum, record) => {
+        sum.inputTokens += record.inputTokens;
+        sum.outputTokens += record.outputTokens;
+        sum.totalTokens += record.totalTokens;
+        sum.cachedInputTokens += record.cachedInputTokens;
+        sum.turnCount += 1;
+        return sum;
+      }, emptyUsageNumbers()));
+      usage.lastUsedAt = records
+        .map((record) => record.at)
+        .sort((a, b) => b.localeCompare(a))[0];
+    } else if (session.tokenUsage) {
+      usage = withCacheHitRate({
+        inputTokens: finiteUsageNumber(session.tokenUsage.inputTokens),
+        outputTokens: finiteUsageNumber(session.tokenUsage.outputTokens),
+        totalTokens: finiteUsageNumber(session.tokenUsage.totalTokens),
+        cachedInputTokens: finiteUsageNumber(session.tokenUsage.cachedInputTokens),
+        turnCount: finiteUsageNumber(session.tokenUsage.turnCount),
+        lastUsedAt: session.tokenUsage.lastUsedAt
+      });
+    } else {
+      if (!records.length) return [];
+      usage = withCacheHitRate(records.reduce((sum, record) => {
+        sum.inputTokens += record.inputTokens;
+        sum.outputTokens += record.outputTokens;
+        sum.totalTokens += record.totalTokens;
+        sum.cachedInputTokens += record.cachedInputTokens;
+        sum.turnCount += 1;
+        return sum;
+      }, emptyUsageNumbers()));
+      usage.lastUsedAt = records
+        .map((record) => record.at)
+        .sort((a, b) => b.localeCompare(a))[0];
+    }
+    if (estimatedCostUsd !== undefined) usage.estimatedCostUsd = estimatedCostUsd;
+
+    return [{
+      accountId: session.accountId,
+      sessionId: session.id,
+      title: session.title,
+      workspace: session.workspace,
+      usage,
+      records
+    }];
+  });
+
+  const totals = withCacheHitRate(views.reduce((sum, session) => {
+    sum.inputTokens += session.usage.inputTokens;
+    sum.outputTokens += session.usage.outputTokens;
+    sum.totalTokens += session.usage.totalTokens;
+    sum.cachedInputTokens += session.usage.cachedInputTokens;
+    sum.turnCount += session.usage.turnCount;
+    return sum;
+  }, emptyUsageNumbers()));
+  const totalEstimatedCostUsd = views.some((session) => session.usage.estimatedCostUsd !== undefined)
+    ? views.reduce((sum, session) => sum + (session.usage.estimatedCostUsd ?? 0), 0)
+    : undefined;
+  if (totalEstimatedCostUsd !== undefined) totals.estimatedCostUsd = totalEstimatedCostUsd;
+
+  const timeline = new Map<string, UsageNumbers>();
+  const allRecords: UsageRecordView[] = [];
+  for (const session of views) {
+    for (const record of session.records) {
+      const date = record.at.slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+      const bucket = timeline.get(date) ?? emptyUsageNumbers();
+      bucket.inputTokens += record.inputTokens;
+      bucket.outputTokens += record.outputTokens;
+      bucket.totalTokens += record.totalTokens;
+      bucket.cachedInputTokens += record.cachedInputTokens;
+      bucket.turnCount += 1;
+      timeline.set(date, bucket);
+      allRecords.push({
+        ...record,
+        accountId: session.accountId,
+        sessionId: session.sessionId,
+        title: session.title
+      });
+    }
+  }
+
+  const sortedSessions = [...views].sort((a, b) => compareUsageSessions(a, b, query.sort));
+  const sortedRecords = allRecords.sort((a, b) => b.at.localeCompare(a.at));
+  const sessionPage = paginate(sortedSessions, query.sessionPage, query.pageSize);
+  const recentPage = paginate(sortedRecords, query.recentPage, query.recentPageSize);
+
+  return {
+    totals,
+    timeline: [...timeline.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, usage]) => ({ date, ...withCacheHitRate(usage) })),
+    sessions: sessionPage.items.map(({ records: _records, ...session }) => session),
+    recent: recentPage.items.map((record) => ({
+      ...record,
+      session: {
+        accountId: record.accountId,
+        sessionId: record.sessionId,
+        title: record.title
+      }
+    })),
+    pagination: {
+      sessions: sessionPage.meta,
+      recent: recentPage.meta
+    },
+    filters: query
+  };
+}
+
+function publicSessionSummaries(sessions: AccountSession[]): Array<Omit<AccountSession, "tokenUsageRecords">> {
+  return sessions.map(({ tokenUsageRecords: _records, ...session }) => session);
+}
+
+type UsagePagination = {
+  page: number;
+  pageSize: number;
+  total: number;
+  pageCount: number;
+};
+
+function paginate<T>(items: T[], requestedPage: number, pageSize: number): { items: T[]; meta: UsagePagination } {
+  const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
+  const page = Math.min(Math.max(1, requestedPage), pageCount);
+  const start = (page - 1) * pageSize;
+  return {
+    items: items.slice(start, start + pageSize),
+    meta: { page, pageSize, total: items.length, pageCount }
+  };
+}
+
+function parseUsageQuery(searchParams: URLSearchParams): UsageQuery {
+  const accountId = firstQueryValue(searchParams, "accountId", "account");
+  const sessionId = firstQueryValue(searchParams, "sessionId", "session");
+  const sortValue = firstQueryValue(searchParams, "sort") ?? "total";
+  if (!(["total", "input", "output", "cache", "recent"] as const).includes(sortValue as UsageQuery["sort"])) {
+    throw new Error("Invalid usage sort");
+  }
+  const pageSize = queryInteger(searchParams, "pageSize", 10, 1, 100);
+  const recentPageSize = queryInteger(searchParams, "recentPageSize", pageSize, 1, 100);
+  const sessionPage = queryInteger(
+    searchParams,
+    "sessionPage",
+    queryInteger(searchParams, "page", 1, 1, 10_000),
+    1,
+    10_000
+  );
+  const recentPage = queryInteger(searchParams, "recentPage", 1, 1, 10_000);
+  const from = parseDateQuery(firstQueryValue(searchParams, "from", "dateFrom", "startDate"), "from");
+  const to = parseDateQuery(firstQueryValue(searchParams, "to", "dateTo", "endDate"), "to");
+  if (from && to && from > to) throw new Error("Usage date range is invalid");
+  return {
+    ...(accountId ? { accountId } : {}),
+    ...(sessionId ? { sessionId } : {}),
+    sort: sortValue as UsageQuery["sort"],
+    sessionPage,
+    recentPage,
+    pageSize,
+    recentPageSize,
+    ...(from ? { from } : {}),
+    ...(to ? { to } : {})
+  };
+}
+
+function firstQueryValue(searchParams: URLSearchParams, ...names: string[]): string | undefined {
+  for (const name of names) {
+    const value = searchParams.get(name)?.trim();
+    if (value) return value;
+  }
+  return undefined;
+}
+
+function queryInteger(searchParams: URLSearchParams, name: string, fallback: number, min: number, max: number): number {
+  const raw = searchParams.get(name);
+  if (raw === null || raw.trim() === "") return fallback;
+  if (!/^\d+$/.test(raw.trim())) throw new Error(`Invalid usage ${name}`);
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < min || value > max) throw new Error(`Invalid usage ${name}`);
+  return value;
+}
+
+function parseDateQuery(value: string | undefined, name: string): string | undefined {
+  if (!value) return undefined;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new Error(`Invalid usage ${name} date`);
+  const [year, month, day] = value.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
+    throw new Error(`Invalid usage ${name} date`);
+  }
+  return value;
+}
+
+function usageDateInRange(value: string, from?: string, to?: string): boolean {
+  const date = value.slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return false;
+  return (!from || date >= from) && (!to || date <= to);
+}
+
+function compareUsageSessions(a: UsageSessionView, b: UsageSessionView, sort: UsageQuery["sort"]): number {
+  if (sort === "input") return compareNumbers(b.usage.inputTokens, a.usage.inputTokens) || compareUsageIdentity(a, b);
+  if (sort === "output") return compareNumbers(b.usage.outputTokens, a.usage.outputTokens) || compareUsageIdentity(a, b);
+  if (sort === "cache") return compareNumbers(b.usage.cacheHitRate, a.usage.cacheHitRate) || compareUsageIdentity(a, b);
+  if (sort === "recent") return String(b.usage.lastUsedAt ?? "").localeCompare(String(a.usage.lastUsedAt ?? "")) || compareUsageIdentity(a, b);
+  return compareNumbers(b.usage.totalTokens, a.usage.totalTokens) || compareUsageIdentity(a, b);
+}
+
+function compareUsageIdentity(a: UsageSessionView, b: UsageSessionView): number {
+  return `${a.title}\u0000${a.sessionId}`.localeCompare(`${b.title}\u0000${b.sessionId}`, "zh-CN");
+}
+
+function compareNumbers(a: number, b: number): number {
+  return a === b ? 0 : a > b ? 1 : -1;
 }
 
 function readProductVersion(): string {

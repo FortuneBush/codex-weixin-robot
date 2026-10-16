@@ -40,6 +40,7 @@ test("uses the Codex V2 initialize, thread, and turn lifecycle", async (t) => {
     }
   });
   assert.equal(first.threadId, "thread-new");
+  assert.equal(first.model, "test-model");
   assert.equal(first.text, "reply:first");
   assert.deepEqual(first.usage, {
     cachedInputTokens: 2,
@@ -62,6 +63,7 @@ test("uses the Codex V2 initialize, thread, and turn lifecycle", async (t) => {
     threadId: "thread-existing"
   });
   assert.equal(resumed.threadId, "thread-existing");
+  assert.equal(resumed.model, "resumed-model");
   assert.equal(resumed.text, "reply:second");
   assert.deepEqual(await runner.getRuntimeInfo("/tmp/project", "thread-existing"), {
     model: "resumed-model",
@@ -138,6 +140,25 @@ test("starts a new context when a saved thread rollout is unavailable", async (t
   assert.equal(result.threadId, "thread-new");
   assert.match(result.text, /previous Codex context was unavailable/i);
   assert.match(result.text, /reply:recover/);
+});
+
+test("starts a new context when app-server reports thread notloaded", async (t) => {
+  const runner = new HybridCodexRunner({
+    backend: "app-server",
+    codexBin: path.join(fixturesDir, "fake-codex-app-server.mjs"),
+    timeoutMs: 2_000
+  });
+  t.after(() => runner.close());
+
+  const result = await runner.run({
+    prompt: "recover-notloaded",
+    cwd: "/tmp/project",
+    threadId: "thread-notloaded"
+  });
+
+  assert.equal(result.threadId, "thread-new");
+  assert.match(result.text, /previous Codex context was unavailable/i);
+  assert.match(result.text, /reply:recover-notloaded/);
 });
 
 test("interrupts the active V2 turn with both threadId and turnId", async (t) => {

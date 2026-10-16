@@ -58,6 +58,8 @@ export type CodexExecRunnerOptions = {
 export type CodexRunResult = {
   text: string;
   threadId?: string;
+  /** Model actually reported by Codex, when available. */
+  model?: string;
   raw: string;
   usage?: CodexTokenUsage;
 };
@@ -116,7 +118,13 @@ export class CodexExecRunner {
           return;
         }
         const parsed = parseCodexExecOutput(raw);
-        resolve({ raw, text: parsed.text, threadId: parsed.threadId, ...(parsed.usage ? { usage: parsed.usage } : {}) });
+        resolve({
+          raw,
+          text: parsed.text,
+          threadId: parsed.threadId,
+          ...((parsed.model ?? input.model) ? { model: parsed.model ?? input.model } : {}),
+          ...(parsed.usage ? { usage: parsed.usage } : {})
+        });
       });
     });
   }
@@ -217,15 +225,17 @@ function resolveMacDesktopCodex(
   return candidates.find((candidate): candidate is string => Boolean(candidate && existsSync(candidate)));
 }
 
-export function parseCodexExecOutput(raw: string): { text: string; threadId?: string; usage?: CodexTokenUsage } {
+export function parseCodexExecOutput(raw: string): { text: string; threadId?: string; model?: string; usage?: CodexTokenUsage } {
   const lines = raw.split(/\r?\n/).filter(Boolean);
   let lastText = "";
   let threadId: string | undefined;
+  let model: string | undefined;
   let usage: CodexTokenUsage | undefined;
   for (const line of lines) {
     try {
       const event = JSON.parse(line) as Record<string, unknown>;
       const type = String(event.type ?? event.event ?? "");
+      model ??= modelFromJsonEvent(event);
       if (type === "thread.started" && typeof event.thread_id === "string") {
         threadId = event.thread_id;
         continue;
@@ -250,7 +260,34 @@ export function parseCodexExecOutput(raw: string): { text: string; threadId?: st
       lastText = line;
     }
   }
-  return { text: lastText || raw.trim(), threadId, ...(usage ? { usage } : {}) };
+  return {
+    text: lastText || raw.trim(),
+    threadId,
+    ...(model ? { model } : {}),
+    ...(usage ? { usage } : {})
+  };
+}
+
+function modelFromJsonEvent(event: Record<string, unknown>): string | undefined {
+  const candidates: unknown[] = [
+    event.model,
+    event.model_id,
+    event.modelId,
+    asRecord(event.runtimeInfo)?.model,
+    asRecord(event.runtime_info)?.model,
+    asRecord(event.thread)?.model,
+    asRecord(event.turn)?.model
+  ];
+  for (const value of candidates) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
 }
 
 export function extractFinalText(raw: string): string {

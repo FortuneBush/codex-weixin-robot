@@ -123,7 +123,7 @@ test("accumulates and persists token usage per managed session", (t) => {
     outputTokens: 40,
     totalTokens: 140,
     cachedInputTokens: 20
-  }, "thread-one");
+  }, "thread-one", "gpt-test");
   store.recordTokenUsage(session.id, {
     inputTokens: 50,
     outputTokens: 10,
@@ -146,6 +146,7 @@ test("accumulates and persists token usage per managed session", (t) => {
     turnCount: 2
   });
   assert.equal(reloaded?.tokenUsageRecords?.length, 2);
+  assert.equal(reloaded?.tokenUsageRecords?.[0]?.model, "gpt-test");
 });
 
 test("persistently claims inbound message ids once and bounds the history", (t) => {
@@ -186,4 +187,21 @@ test("stores the latest WeChat sync key across monitor restarts", (t) => {
   assert.equal(store.getSyncKey(), undefined);
   store.setSyncKey("sync-next");
   assert.equal(store.getSyncKey(), "sync-next");
+});
+
+test("preserves updates when two RuntimeStateStore instances share a state file", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-state-multi-instance-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const paths = resolveStatePaths(root);
+  const first = new RuntimeStateStore(paths);
+  const second = new RuntimeStateStore(paths);
+
+  first.setSyncKey("sync-first");
+  const session = second.createSession("alice@im.wechat", "/work/one", "Shared");
+  first.rememberContextToken("alice@im.wechat", "context-token");
+
+  const reloaded = new RuntimeStateStore(paths);
+  assert.equal(reloaded.getSyncKey(), "sync-first");
+  assert.equal(reloaded.getContextToken("alice@im.wechat"), "context-token");
+  assert.equal(reloaded.getSession(session.id)?.title, "Shared");
 });

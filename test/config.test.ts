@@ -12,6 +12,23 @@ test("uses ~/.codex-weixin as the default Codex workspace", () => {
   assert.deepEqual(defaultConfig().allowedWorkspaces, [path.join(os.homedir(), ".codex-weixin")]);
   assert.equal(defaultConfig().streamReplies, true);
   assert.equal(defaultConfig().maxInboundBytes, 100 * 1024 * 1024);
+  assert.deepEqual(defaultConfig().modelPricing, {});
+});
+
+test("loads and normalizes configurable model prices", (t) => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-config-pricing-"));
+  t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }));
+  const paths = resolveStatePaths(stateDir);
+  fs.writeFileSync(paths.configPath, JSON.stringify({
+    modelPricing: {
+      "gpt-5-*": { inputPerMillionUsd: 1, outputPerMillionUsd: 4, cachedInputPerMillionUsd: 0.2 },
+      invalid: { inputPerMillionUsd: -1, outputPerMillionUsd: 2 }
+    }
+  }));
+
+  assert.deepEqual(loadConfig(paths, "/tmp/project").modelPricing, {
+    "gpt-5-*": { inputPerMillionUsd: 1, outputPerMillionUsd: 4, cachedInputPerMillionUsd: 0.2 }
+  });
 });
 
 test("migrates the legacy inbound limit and never exceeds 100 MiB", (t) => {

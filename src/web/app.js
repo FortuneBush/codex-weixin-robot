@@ -7,6 +7,7 @@ const state = {
   codex: null,
   codexRuntime: null,
   codexModels: [],
+  usageData: null,
   loginPoll: null,
   selectedSessionKey: "",
   sessionMessages: [],
@@ -18,6 +19,8 @@ const state = {
   chatFiles: [],
   usageAccountFilter: "",
   usageSessionFilter: "",
+  usageFrom: "",
+  usageTo: "",
   usageSort: "total",
   usagePageSize: 10,
   usageSessionPage: 1,
@@ -72,6 +75,8 @@ document.addEventListener("DOMContentLoaded", () => {
     usageRecentEmpty: document.querySelector("#usageRecentEmpty"),
     usageAccountFilter: document.querySelector("#usageAccountFilter"),
     usageSessionFilter: document.querySelector("#usageSessionFilter"),
+    usageFrom: document.querySelector("#usageFrom"),
+    usageTo: document.querySelector("#usageTo"),
     usageSortFilter: document.querySelector("#usageSortFilter"),
     usagePageSize: document.querySelector("#usagePageSize"),
     usageResetFilters: document.querySelector("#usageResetFilters"),
@@ -119,6 +124,8 @@ function bindEvents() {
   els.sessionAccountTabs.addEventListener("click", handleSessionAccountTab);
   els.usageAccountFilter.addEventListener("change", handleUsageFilterChange);
   els.usageSessionFilter.addEventListener("change", handleUsageFilterChange);
+  els.usageFrom.addEventListener("change", handleUsageFilterChange);
+  els.usageTo.addEventListener("change", handleUsageFilterChange);
   els.usageSortFilter.addEventListener("change", handleUsageFilterChange);
   els.usagePageSize.addEventListener("change", handleUsagePageSizeChange);
   els.usageResetFilters.addEventListener("click", resetUsageFilters);
@@ -141,6 +148,7 @@ async function bootstrap() {
     state.codexModels = data.codexModels || [];
     renderAll();
     showView(location.hash.slice(1) || "accounts", false);
+    await refreshUsage(false);
     window.setInterval(() => void refreshData(false), 5000);
   } catch (error) {
     toast(error.message, true);
@@ -157,7 +165,7 @@ async function refreshData(notify) {
     renderMetrics();
     renderAccounts();
     renderSessions();
-    renderUsage();
+    await refreshUsage(false);
     drawIcons();
     const currentSession = selectedSession();
     if (
@@ -173,6 +181,29 @@ async function refreshData(notify) {
       window.requestAnimationFrame(scrollChatToEnd);
     }
     if (notify) toast("状态已刷新");
+  } catch (error) {
+    if (notify) toast(error.message, true);
+  }
+}
+
+async function refreshUsage(notify = false) {
+  try {
+    renderUsageFilters(state.sessions.filter((session) => session.tokenUsage && (session.tokenUsage.totalTokens || 0) > 0));
+    const params = new URLSearchParams({
+      sort: state.usageSort,
+      pageSize: String(state.usagePageSize),
+      sessionPage: String(state.usageSessionPage),
+      recentPage: String(state.usageRecentPage)
+    });
+    if (state.usageAccountFilter) params.set("accountId", state.usageAccountFilter);
+    if (state.usageSessionFilter) params.set("sessionId", state.usageSessionFilter);
+    if (state.usageFrom) params.set("from", state.usageFrom);
+    if (state.usageTo) params.set("to", state.usageTo);
+    const data = await api(`/api/usage?${params.toString()}`);
+    state.usageData = data;
+    renderUsage();
+    drawIcons();
+    if (notify) toast("Token 统计已刷新");
   } catch (error) {
     if (notify) toast(error.message, true);
   }
@@ -255,6 +286,7 @@ function renderAccounts() {
       </details>
       <div class="account-detail">${renderAuthorizationState(account, pendingSender)}</div>
       ${authorized && pendingSender ? `<div class="pending-access"><div><strong>新的微信访问请求</strong><span>当前授权不受影响，可选择允许新的访问</span></div><button class="button button-secondary" type="button" data-account-action="allow" data-account-id="${escapeAttr(account.accountId)}" data-sender-id="${escapeAttr(pendingSender)}"><i data-lucide="user-check"></i><span>允许访问</span></button></div>` : ""}
+      ${account.lastPollError ? `<div class="pending-access"><div><strong>微信连接异常，正在重试</strong><span>${escapeHtml(account.lastPollError)}</span></div></div>` : ""}
       ${account.error ? `<div class="pending-access"><div><strong>账号运行错误</strong><span>${escapeHtml(account.error)}</span></div></div>` : ""}
     </article>`;
   }).join("");
@@ -346,6 +378,10 @@ function renderSettings() {
   document.querySelector("#backendInput").value = state.config.codexBackend || "auto";
   document.querySelector("#sandboxInput").value = state.config.codexExecSandbox || "";
   document.querySelector("#streamRepliesInput").checked = Boolean(state.config.streamReplies);
+  const pricingInput = document.querySelector("#modelPricingInput");
+  if (pricingInput) {
+    pricingInput.value = JSON.stringify(state.config.modelPricing || {}, null, 2);
+  }
   renderModelOptions();
   document.querySelector("#effectiveModelValue").textContent = state.codexRuntime?.model || state.config.model || "Codex 默认";
   document.querySelector("#effectiveEffortValue").textContent = state.codexRuntime?.effort || state.config.effort || "Codex 默认";
@@ -1141,6 +1177,15 @@ async function saveSettings(event) {
   const button = event.submitter;
   try {
     button.disabled = true;
+    let modelPricing;
+    try {
+      modelPricing = JSON.parse(document.querySelector("#modelPricingInput").value || "{}");
+    } catch {
+      throw new Error("模型价格必须是有效的 JSON 对象");
+    }
+    if (!modelPricing || Array.isArray(modelPricing) || typeof modelPricing !== "object") {
+      throw new Error("模型价格必须是 JSON 对象");
+    }
     const result = await api("/api/config", {
       method: "PUT",
       body: {
@@ -1150,6 +1195,7 @@ async function saveSettings(event) {
         codexExecSandbox: document.querySelector("#sandboxInput").value || null,
         model: document.querySelector("#modelInput").value.trim(),
         effort: document.querySelector("#effortInput").value.trim(),
+        modelPricing,
         streamReplies: document.querySelector("#streamRepliesInput").checked
       }
     });
@@ -1268,29 +1314,31 @@ function relativeTime(value) {
 function handleUsageFilterChange() {
   state.usageAccountFilter = els.usageAccountFilter.value;
   state.usageSessionFilter = els.usageSessionFilter.value;
+  state.usageFrom = els.usageFrom.value;
+  state.usageTo = els.usageTo.value;
   state.usageSort = els.usageSortFilter.value;
   state.usageSessionPage = 1;
   state.usageRecentPage = 1;
-  renderUsage();
-  drawIcons();
+  void refreshUsage(false);
 }
 
 function handleUsagePageSizeChange() {
   state.usagePageSize = Math.max(1, Number(els.usagePageSize.value) || 10);
   state.usageSessionPage = 1;
   state.usageRecentPage = 1;
-  renderUsage();
+  void refreshUsage(false);
 }
 
 function resetUsageFilters() {
   state.usageAccountFilter = "";
   state.usageSessionFilter = "";
+  state.usageFrom = "";
+  state.usageTo = "";
   state.usageSort = "total";
   state.usagePageSize = 10;
   state.usageSessionPage = 1;
   state.usageRecentPage = 1;
-  renderUsage();
-  drawIcons();
+  void refreshUsage(false);
 }
 
 function handleUsagePagination(event) {
@@ -1300,30 +1348,18 @@ function handleUsagePagination(event) {
   if (!Number.isInteger(page) || page < 1) return;
   if (button.closest("#usageSessionPagination")) state.usageSessionPage = page;
   if (button.closest("#usageRecentPagination")) state.usageRecentPage = page;
-  renderUsage();
+  void refreshUsage(false);
 }
 
 function renderUsage() {
-  const allUsageSessions = state.sessions
-    .filter((session) => session.tokenUsage && (session.tokenUsage.totalTokens || 0) > 0);
+  const allUsageSessions = state.sessions.filter((session) => session.tokenUsage && (session.tokenUsage.totalTokens || 0) > 0);
   renderUsageFilters(allUsageSessions);
-  const sessions = filterUsageSessions(allUsageSessions);
-  const totals = sessions.reduce((sum, session) => {
-    const usage = session.tokenUsage;
-    sum.inputTokens += usage.inputTokens || 0;
-    sum.outputTokens += usage.outputTokens || 0;
-    sum.totalTokens += usage.totalTokens || 0;
-    sum.cachedInputTokens += usage.cachedInputTokens || 0;
-    sum.turnCount += usage.turnCount || 0;
-    return sum;
-  }, { inputTokens: 0, outputTokens: 0, totalTokens: 0, cachedInputTokens: 0, turnCount: 0 });
+  const data = state.usageData;
+  const totals = data?.totals || { inputTokens: 0, outputTokens: 0, totalTokens: 0, cachedInputTokens: 0, turnCount: 0 };
+  const sessions = data?.sessions || [];
+  const records = data?.recent || [];
   const cacheRate = ratio(totals.cachedInputTokens, totals.inputTokens);
   const freshInputTokens = Math.max(0, totals.inputTokens - totals.cachedInputTokens);
-  const records = sessions.flatMap((session) => (session.tokenUsageRecords || []).map((record, index) => ({
-    ...record,
-    session,
-    key: `${session.id}-${record.at || index}-${index}`
-  }))).sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime());
 
   els.usageTotal.textContent = formatTokenCount(totals.totalTokens);
   els.usageInput.textContent = formatTokenCount(totals.inputTokens);
@@ -1334,12 +1370,14 @@ function renderUsage() {
     : "缓存输入 / 输入 Token";
   els.usageTurns.textContent = formatTokenCount(totals.turnCount);
   els.usageAvgTurn.textContent = `平均每轮 ${formatTokenCount(totals.turnCount ? totals.totalTokens / totals.turnCount : 0)} Token`;
-  els.usageSortNote.textContent = `当前排序：${usageSortLabel(state.usageSort)} · ${sessions.length} 个会话`;
+  const sessionTotal = data?.pagination?.sessions?.total || 0;
+  els.usageSortNote.textContent = `当前排序：${usageSortLabel(state.usageSort)} · ${sessionTotal} 个会话`;
+  renderUsageCost(totals.estimatedCostUsd);
 
   renderUsageMix(totals, cacheRate, freshInputTokens);
-  renderUsageTrend(records);
-  els.usageEmpty.hidden = sessions.length > 0;
-  renderUsageSessions(sessions);
+  renderUsageTrend(data?.timeline || []);
+  els.usageEmpty.hidden = sessionTotal > 0;
+  renderUsageSessions(sessions, data?.pagination?.sessions);
   renderUsageRecent(records);
 }
 
@@ -1373,6 +1411,8 @@ function renderUsageFilters(sessions) {
   if (!usageSortValues().some(([value]) => value === state.usageSort)) state.usageSort = "total";
   els.usageSortFilter.value = state.usageSort;
   els.usagePageSize.value = String(state.usagePageSize);
+  els.usageFrom.value = state.usageFrom;
+  els.usageTo.value = state.usageTo;
 }
 
 function setUsageSelectOptions(select, options, value) {
@@ -1382,23 +1422,6 @@ function setUsageSelectOptions(select, options, value) {
     select.dataset.optionsKey = key;
   }
   select.value = options.some(([optionValue]) => optionValue === value) ? value : options[0]?.[0] || "";
-}
-
-function filterUsageSessions(sessions) {
-  return sessions
-    .filter((session) => !state.usageAccountFilter || session.accountId === state.usageAccountFilter)
-    .filter((session) => !state.usageSessionFilter || session.id === state.usageSessionFilter)
-    .sort((a, b) => compareUsageSessions(a, b, state.usageSort));
-}
-
-function compareUsageSessions(a, b, sort) {
-  const aUsage = a.tokenUsage || {};
-  const bUsage = b.tokenUsage || {};
-  if (sort === "input") return (bUsage.inputTokens || 0) - (aUsage.inputTokens || 0);
-  if (sort === "output") return (bUsage.outputTokens || 0) - (aUsage.outputTokens || 0);
-  if (sort === "cache") return ratio(bUsage.cachedInputTokens || 0, bUsage.inputTokens || 0) - ratio(aUsage.cachedInputTokens || 0, aUsage.inputTokens || 0);
-  if (sort === "recent") return String(bUsage.lastUsedAt || b.updatedAt).localeCompare(String(aUsage.lastUsedAt || a.updatedAt));
-  return (bUsage.totalTokens || 0) - (aUsage.totalTokens || 0);
 }
 
 function usageSortValues() {
@@ -1421,20 +1444,26 @@ function renderUsageMix(totals, cacheRate, freshInputTokens) {
     <div class="usage-mix-stat usage-mix-stat-output"><i></i><span>Output Token</span><strong>${formatTokenCount(totals.outputTokens)}</strong></div>`;
 }
 
-function renderUsageTrend(records) {
-  const buckets = new Map();
-  records.forEach((record) => {
-    const date = new Date(record.at);
-    if (Number.isNaN(date.getTime())) return;
-    const key = date.toISOString().slice(0, 10);
-    const bucket = buckets.get(key) || { date, input: 0, output: 0, cached: 0, turns: 0 };
-    bucket.input += Number(record.inputTokens) || 0;
-    bucket.output += Number(record.outputTokens) || 0;
-    bucket.cached += Number(record.cachedInputTokens) || 0;
-    bucket.turns += 1;
-    buckets.set(key, bucket);
-  });
-  const points = [...buckets.values()].sort((a, b) => a.date - b.date).slice(-14);
+function renderUsageCost(value) {
+  const node = document.querySelector("#usageCost");
+  const detail = document.querySelector("#usageCostDetail");
+  if (!node) return;
+  node.textContent = value === undefined || value === null ? "--" : formatCost(value);
+  if (detail) detail.textContent = value === undefined || value === null ? "请先配置模型价格" : "按已配置价格估算 · USD";
+}
+
+function renderUsageTrend(timeline) {
+  const points = timeline
+    .map((point) => ({
+      date: new Date(`${point.date}T00:00:00`),
+      input: Number(point.inputTokens) || 0,
+      output: Number(point.outputTokens) || 0,
+      cached: Number(point.cachedInputTokens) || 0,
+      turns: Number(point.turnCount) || 0
+    }))
+    .filter((point) => !Number.isNaN(point.date.getTime()))
+    .sort((a, b) => a.date - b.date)
+    .slice(-14);
   els.usageTrendEmpty.hidden = points.length > 0;
   if (!points.length) {
     els.usageTrend.innerHTML = "";
@@ -1469,17 +1498,17 @@ function renderUsageTrend(records) {
   </svg>`;
 }
 
-function renderUsageSessions(sessions) {
-  const pageData = paginateUsageItems(sessions, state.usageSessionPage, state.usagePageSize);
-  state.usageSessionPage = pageData.page;
+function renderUsageSessions(sessions, pagination) {
+  const pageData = pagination || { page: state.usageSessionPage, pageCount: 0, total: 0 };
+  state.usageSessionPage = pageData.page || 1;
   if (!sessions.length) {
     els.usageChart.innerHTML = "";
     els.usageEmpty.textContent = allUsageFiltersEmpty() ? "暂无 Token 使用记录，完成一次 Codex 请求后会显示统计数据。" : "没有符合当前筛选条件的会话。";
     renderUsagePagination(els.usageSessionPagination, 1, 0, 0, "usageSessionPage");
     return;
   }
-  els.usageChart.innerHTML = pageData.items.map((session) => {
-    const usage = session.tokenUsage;
+  els.usageChart.innerHTML = sessions.map((session) => {
+    const usage = session.usage;
     const total = usage.totalTokens || 0;
     const cached = Math.min(usage.cachedInputTokens || 0, usage.inputTokens || 0);
     const fresh = Math.max(0, (usage.inputTokens || 0) - cached);
@@ -1494,44 +1523,32 @@ function renderUsageSessions(sessions) {
         <svg class="usage-bar-svg" viewBox="0 0 100 18" preserveAspectRatio="none" aria-hidden="true"><rect class="usage-bar-input" x="0" y="0" width="${freshWidth.toFixed(2)}" height="18" fill="#16a05a"><title>Input（未缓存）${formatExactTokenCount(fresh)} Token</title></rect><rect class="usage-bar-cache" x="${freshWidth.toFixed(2)}" y="0" width="${cacheWidth.toFixed(2)}" height="18" fill="#db9a1b"><title>Cached ${formatExactTokenCount(cached)} Token</title></rect><rect class="usage-bar-output" x="${(freshWidth + cacheWidth).toFixed(2)}" y="0" width="${outputWidth.toFixed(2)}" height="18" fill="#2879d8"><title>Output ${formatExactTokenCount(usage.outputTokens || 0)} Token</title></rect></svg>
       </div>
       <strong class="usage-row-total">${formatTokenCount(total)}</strong>
-      <small class="usage-row-meta">Input ${formatExactTokenCount(usage.inputTokens || 0)} · Cached ${formatExactTokenCount(cached)} · Output ${formatExactTokenCount(usage.outputTokens || 0)} · Hit ${formatPercent(cacheRate)}</small>
+      <small class="usage-row-meta">Input ${formatExactTokenCount(usage.inputTokens || 0)} · Cached ${formatExactTokenCount(cached)} · Output ${formatExactTokenCount(usage.outputTokens || 0)} · Hit ${formatPercent(cacheRate)}${usage.estimatedCostUsd !== undefined ? ` · 估算 ${formatCost(usage.estimatedCostUsd)}` : ""}</small>
     </div>`;
   }).join("");
   renderUsagePagination(els.usageSessionPagination, pageData.page, pageData.pageCount, pageData.total, "usageSessionPage");
 }
 
 function renderUsageRecent(records) {
-  const pageData = paginateUsageItems(records, state.usageRecentPage, state.usagePageSize);
-  state.usageRecentPage = pageData.page;
-  const recent = pageData.items;
+  const pagination = state.usageData?.pagination?.recent || { page: state.usageRecentPage, pageCount: 0, total: records.length };
+  const pageData = pagination;
+  state.usageRecentPage = pageData.page || 1;
+  const recent = records;
   els.usageRecentEmpty.hidden = recent.length > 0;
-  els.usageRecentCount.textContent = records.length ? `第 ${pageData.start}-${pageData.end} 条 / 共 ${records.length} 条记录` : "0 条记录";
+  const start = recent.length ? (pageData.page - 1) * pageData.pageSize + 1 : 0;
+  const end = recent.length ? start + recent.length - 1 : 0;
+  els.usageRecentCount.textContent = pageData.total ? `第 ${start}-${end} 条 / 共 ${pageData.total} 条记录` : "0 条记录";
   if (!recent.length) {
     els.usageRecent.innerHTML = "";
-    els.usageRecentEmpty.textContent = records.length ? "当前页没有请求记录。" : (allUsageFiltersEmpty() ? "暂无请求记录。" : "没有符合当前筛选条件的请求。");
+    els.usageRecentEmpty.textContent = pageData.total ? "当前页没有请求记录。" : (allUsageFiltersEmpty() ? "暂无请求记录。" : "没有符合当前筛选条件的请求。");
     renderUsagePagination(els.usageRecentPagination, 1, 0, 0, "usageRecentPage");
     return;
   }
-  els.usageRecent.innerHTML = `<div class="usage-recent-head" role="row"><span>会话</span><span>Input</span><span>Output</span><span>Cache hit</span><span>时间</span></div>${recent.map((record) => {
+  els.usageRecent.innerHTML = `<div class="usage-recent-head" role="row"><span>会话</span><span>Input</span><span>Output</span><span>Cache hit</span><span>估算成本</span><span>时间</span></div>${recent.map((record) => {
     const cacheRate = ratio(record.cachedInputTokens || 0, record.inputTokens || 0);
-    return `<div class="usage-recent-row" role="row"><div class="usage-recent-session"><strong>${escapeHtml(record.session.title)}</strong><small>${escapeHtml(accountDisplayName(record.session.accountId))}</small></div><span class="usage-recent-number">${formatExactTokenCount(record.inputTokens || 0)}</span><span class="usage-recent-number">${formatExactTokenCount(record.outputTokens || 0)}</span><span class="usage-recent-cache">${record.inputTokens ? formatPercent(cacheRate) : "--"}</span><span class="usage-recent-number">${escapeHtml(relativeTime(record.at))}</span></div>`;
+    return `<div class="usage-recent-row" role="row"><div class="usage-recent-session"><strong>${escapeHtml(record.session.title)}</strong><small>${escapeHtml(accountDisplayName(record.session.accountId))}</small></div><span class="usage-recent-number">${formatExactTokenCount(record.inputTokens || 0)}</span><span class="usage-recent-number">${formatExactTokenCount(record.outputTokens || 0)}</span><span class="usage-recent-cache">${record.inputTokens ? formatPercent(cacheRate) : "--"}</span><span class="usage-recent-number">${record.estimatedCostUsd !== undefined ? formatCost(record.estimatedCostUsd) : "--"}</span><span class="usage-recent-number">${escapeHtml(relativeTime(record.at))}</span></div>`;
   }).join("")}`;
   renderUsagePagination(els.usageRecentPagination, pageData.page, pageData.pageCount, pageData.total, "usageRecentPage");
-}
-
-function paginateUsageItems(items, page, pageSize) {
-  const total = items.length;
-  const pageCount = Math.max(1, Math.ceil(total / pageSize));
-  const currentPage = Math.min(Math.max(1, Number(page) || 1), pageCount);
-  const startIndex = total ? (currentPage - 1) * pageSize : 0;
-  return {
-    items: items.slice(startIndex, startIndex + pageSize),
-    page: currentPage,
-    pageCount: total ? pageCount : 0,
-    total,
-    start: total ? startIndex + 1 : 0,
-    end: Math.min(startIndex + pageSize, total)
-  };
 }
 
 function renderUsagePagination(container, page, pageCount, total, target) {
@@ -1545,7 +1562,7 @@ function renderUsagePagination(container, page, pageCount, total, target) {
 }
 
 function allUsageFiltersEmpty() {
-  return !state.usageAccountFilter && !state.usageSessionFilter;
+  return !state.usageAccountFilter && !state.usageSessionFilter && !state.usageFrom && !state.usageTo;
 }
 
 function ratio(numerator, denominator) {
@@ -1574,6 +1591,12 @@ function formatExactTokenCount(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return "0";
   return new Intl.NumberFormat("zh-CN").format(number);
+}
+
+function formatCost(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "--";
+  return `$${number.toFixed(number >= 1 ? 2 : 4)}`;
 }
 
 function messageTime(value) {

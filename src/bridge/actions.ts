@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -34,6 +35,47 @@ function assertAbsolutePath(value: string, label: string): void {
   if (!isAbsoluteLocalPath(value)) {
     throw new Error(`${label} must be an absolute path: ${value}`);
   }
+}
+
+/**
+ * Checks that a local file stays below one of the roots assigned to the
+ * current session.  The lexical check prevents `..` traversal while the
+ * realpath check also prevents a symlink inside an allowed directory from
+ * pointing at an arbitrary file elsewhere on the machine.
+ */
+export function isPathWithinAllowedRoots(filePath: string, roots: readonly string[]): boolean {
+  if (!isAbsoluteLocalPath(filePath) || !roots.length) return false;
+  const resolvedFile = path.resolve(filePath);
+  if (!roots.some((root) => isPathWithinRoot(resolvedFile, path.resolve(root)))) return false;
+
+  let realFile: string;
+  try {
+    realFile = fs.realpathSync.native(resolvedFile);
+  } catch {
+    return false;
+  }
+  return roots.some((root) => {
+    try {
+      return isPathWithinRoot(realFile, fs.realpathSync.native(path.resolve(root)));
+    } catch {
+      return false;
+    }
+  });
+}
+
+export function assertPathWithinAllowedRoots(filePath: string, roots: readonly string[], label = "send action path"): void {
+  if (!isPathWithinAllowedRoots(filePath, roots)) {
+    throw new Error(`${label} is outside the allowed workspace or inbound directories`);
+  }
+}
+
+function isPathWithinRoot(filePath: string, root: string): boolean {
+  const relative = path.relative(root, filePath);
+  return relative === "" || (
+    relative !== ".." &&
+    !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative)
+  );
 }
 
 function normalizeSendAction(raw: unknown): SendAction {

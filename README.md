@@ -95,18 +95,19 @@ npm run dev
 Token 统计页每 `5` 秒自动刷新。统计来自本机受管会话记录，用于观察当前服务消耗，不是 OpenAI 账单数据。
 
 - 顶部 KPI 显示累计 Token、Input、Output、Cache Hit Rate、请求轮数和平均每轮 Token。
+- 如果在设置页配置了模型价格，顶部还会显示按 USD/1M Token 计算的估算成本；未配置价格时显示 `--`。
 - 趋势图按日期绘制 Input、Output 和 Cached；页面最多展示最近 `14` 个日期点。
 - 输入构成图区分缓存输入和未缓存输入，便于判断上下文复用情况。
 - “会话消耗排行”使用彩色分段柱：Input 使用绿色、Cached 使用黄色、Output 使用蓝色，并在柱下显示具体数值和缓存命中率。
 - “最近请求”列出每轮的账号、会话、Input、Output、Cached、总量和发生时间。
 - 可以按微信账号和会话筛选，按累计 Token、Input、Output、Cache Hit Rate 或最近使用时间排序。
-- 会话排行和最近请求都支持分页，每页可选 `5`、`10` 或 `20` 条；筛选条件、KPI、图表和列表会同步更新。
+- 会话排行和最近请求都支持服务端分页，每页可选 `5`、`10` 或 `20` 条；筛选条件、KPI、图表、估算成本和列表会同步更新。
 
 统计口径如下：`Input` 是输入上下文 Token，`Output` 是模型生成 Token，`Cached` 是命中的缓存输入 Token，`Cache Hit Rate = Cached / Input`。没有 Input 时命中率显示为 `--`。每个受管会话最多保留最近 `1000` 条 Token 记录。
 
 ### 设置
 
-设置页用于维护默认工作目录、允许的工作区、Codex 后端、exec sandbox、默认模型、推理强度和流式回复。也可以查看运行信息、检查版本并执行更新。默认配置适合本机使用；改变 sandbox 权限前请确认 Codex 需要访问的文件范围。
+设置页用于维护默认工作目录、允许的工作区、Codex 后端、exec sandbox、默认模型、推理强度、流式回复和模型价格。模型价格使用 JSON 配置，单位为 USD/1M Token，支持精确模型名、前缀通配符（例如 `gpt-5*`）和 `*` 默认价格。也可以查看运行信息、检查版本并执行更新。默认配置适合本机使用；改变 sandbox 权限前请确认 Codex 需要访问的文件范围。
 
 ## 微信命令
 
@@ -156,10 +157,23 @@ Web 设置页会把配置写入状态目录中的 `config.json`。主要字段�
 | `codexExecSandbox` | `read-only`、`workspace-write` 或 `danger-full-access` |
 | `codexTimeoutMs` | Codex 单次任务超时；留空表示不限制，范围为 1 分钟至 24 小时 |
 | `model` / `effort` | 默认模型和推理强度，留空表示沿用 Codex 设置 |
+| `modelPricing` | 模型价格表，包含 `inputPerMillionUsd`、`outputPerMillionUsd` 和可选的 `cachedInputPerMillionUsd` |
 | `streamReplies` | 是否向微信发送过程进度 |
 | `allowedSenderIds` | 允许使用服务的微信联系人 ID |
 | `maxBufferItems` / `promptBufferTtlMs` | 消息缓冲数量和过期时间 |
 | `maxInboundBytes` | 入站附件大小上限，默认 `100 MiB` |
+
+模型价格示例：
+
+```json
+{
+  "gpt-5*": {
+    "inputPerMillionUsd": 1,
+    "outputPerMillionUsd": 5,
+    "cachedInputPerMillionUsd": 0.25
+  }
+}
+```
 
 ### 环境变量
 

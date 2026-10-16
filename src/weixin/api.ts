@@ -6,6 +6,8 @@ export type WeixinApiClientOptions = {
   baseUrl: string;
   token: string;
   fetch?: FetchLike;
+  /** Maximum time allowed for one API request. Set to 0 to disable. */
+  requestTimeoutMs?: number;
 };
 
 export class WeixinApiError extends Error {
@@ -20,6 +22,13 @@ export class WeixinApiError extends Error {
   }
 }
 
+export class WeixinApiTimeoutError extends WeixinApiError {
+  constructor(endpoint: string, public readonly timeoutMs: number) {
+    super(`${shortEndpoint(endpoint)} timed out after ${timeoutMs} ms`, shortEndpoint(endpoint));
+    this.name = "WeixinApiTimeoutError";
+  }
+}
+
 export function isStaleContextError(error: unknown): boolean {
   return error instanceof WeixinApiError && error.endpoint === "sendmessage" && error.ret === -2;
 }
@@ -27,10 +36,14 @@ export function isStaleContextError(error: unknown): boolean {
 export class WeixinApiClient {
   private readonly baseUrl: string;
   private readonly fetchImpl: FetchLike;
+  private readonly requestTimeoutMs: number;
 
   constructor(private readonly options: WeixinApiClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
+    this.requestTimeoutMs = Number.isFinite(options.requestTimeoutMs)
+      ? Math.max(0, options.requestTimeoutMs ?? 0)
+      : 30_000;
   }
 
   async getUpdates(syncKey?: string, signal?: AbortSignal): Promise<unknown> {
@@ -44,6 +57,7 @@ export class WeixinApiClient {
     toUserId: string;
     text: string;
     contextToken?: string;
+    signal?: AbortSignal;
   }): Promise<{ messageId: string }> {
     const clientId = crypto.randomUUID();
     const body = {
@@ -58,16 +72,16 @@ export class WeixinApiClient {
       },
       base_info: { channel_version: "0.1.0" }
     };
-    const response = await this.post("ilink/bot/sendmessage", body);
+    const response = await this.post("ilink/bot/sendmessage", body, input.signal);
     return { messageId: String(response.message_id ?? response.msgid ?? clientId) };
   }
 
-  async sendTyping(input: { toUserId: string; contextToken?: string; typing?: boolean }): Promise<void> {
+  async sendTyping(input: { toUserId: string; contextToken?: string; typing?: boolean; signal?: AbortSignal }): Promise<void> {
     const config = await this.post("ilink/bot/getconfig", {
       ilink_user_id: input.toUserId,
       ...(input.contextToken ? { context_token: input.contextToken } : {}),
       base_info: { channel_version: "0.1.0" }
-    });
+    }, input.signal);
     const typingTicket = typeof config.typing_ticket === "string" ? config.typing_ticket.trim() : "";
     if (!typingTicket) {
       throw new Error("getconfig response missing typing_ticket");
@@ -77,7 +91,7 @@ export class WeixinApiClient {
       typing_ticket: typingTicket,
       status: input.typing === false ? 2 : 1,
       base_info: { channel_version: "0.1.0" }
-    });
+    }, input.signal);
   }
 
   async getUploadUrl(input: {
@@ -89,6 +103,7 @@ export class WeixinApiClient {
     cipherSize: number;
     noNeedThumb?: boolean;
     aesKeyHex?: string;
+    signal?: AbortSignal;
   }): Promise<{ uploadParam?: string; uploadFullUrl?: string; fileKey?: string }> {
     const response = await this.post("ilink/bot/getuploadurl", {
       filekey: input.fileKey,
@@ -100,7 +115,7 @@ export class WeixinApiClient {
       ...(typeof input.noNeedThumb === "boolean" ? { no_need_thumb: input.noNeedThumb } : {}),
       ...(input.aesKeyHex ? { aeskey: input.aesKeyHex } : {}),
       base_info: { channel_version: "0.1.0" }
-    });
+    }, input.signal);
     return {
       uploadParam: typeof response.upload_param === "string" ? response.upload_param : undefined,
       uploadFullUrl: typeof response.upload_full_url === "string" ? response.upload_full_url : undefined,
@@ -115,6 +130,7 @@ export class WeixinApiClient {
     aesKeyBase64: string;
     plainSize: number;
     contextToken?: string;
+    signal?: AbortSignal;
   }): Promise<{ messageId: string }> {
     const clientId = crypto.randomUUID();
     const response = await this.post("ilink/bot/sendmessage", {
@@ -139,7 +155,7 @@ export class WeixinApiClient {
         }]
       },
       base_info: { channel_version: "0.1.0" }
-    });
+    }, input.signal);
     return { messageId: String(response.message_id ?? response.msgid ?? clientId) };
   }
 
@@ -149,6 +165,7 @@ export class WeixinApiClient {
     aesKeyBase64: string;
     cipherSize: number;
     contextToken?: string;
+    signal?: AbortSignal;
   }): Promise<{ messageId: string }> {
     const clientId = crypto.randomUUID();
     const response = await this.post("ilink/bot/sendmessage", {
@@ -173,7 +190,7 @@ export class WeixinApiClient {
         }]
       },
       base_info: { channel_version: "0.1.0" }
-    });
+    }, input.signal);
     return { messageId: String(response.message_id ?? response.msgid ?? clientId) };
   }
 
@@ -183,6 +200,7 @@ export class WeixinApiClient {
     aesKeyBase64: string;
     cipherSize: number;
     contextToken?: string;
+    signal?: AbortSignal;
   }): Promise<{ messageId: string }> {
     const clientId = crypto.randomUUID();
     const response = await this.post("ilink/bot/sendmessage", {
@@ -206,40 +224,84 @@ export class WeixinApiClient {
         }]
       },
       base_info: { channel_version: "0.1.0" }
-    });
+    }, input.signal);
     return { messageId: String(response.message_id ?? response.msgid ?? clientId) };
   }
 
   private async post(endpoint: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
-    const response = await this.fetchImpl(`${this.baseUrl}/${endpoint}`, {
-      method: "POST",
-      signal,
-      headers: {
-        "Content-Type": "application/json",
-        AuthorizationType: "ilink_bot_token",
-        Authorization: `Bearer ${this.options.token}`
-      },
-      body: JSON.stringify(body)
-    });
+    const timeout = createRequestSignal(signal, this.requestTimeoutMs);
+    try {
+      const response = await this.fetchImpl(`${this.baseUrl}/${endpoint}`, {
+        method: "POST",
+        signal: timeout.signal,
+        headers: {
+          "Content-Type": "application/json",
+          AuthorizationType: "ilink_bot_token",
+          Authorization: `Bearer ${this.options.token}`
+        },
+        body: JSON.stringify(body)
+      });
 
-    const text = await response.text();
-    if (!response.ok) {
-      throw new WeixinApiError(`${endpoint} failed with HTTP ${response.status}: ${text}`, shortEndpoint(endpoint));
-    }
+      const text = await response.text();
+      if (!response.ok) {
+        throw new WeixinApiError(`${endpoint} failed with HTTP ${response.status}: ${text}`, shortEndpoint(endpoint));
+      }
 
-    const parsed = text ? JSON.parse(text) as Record<string, unknown> : {};
-    const ret = typeof parsed.ret === "number" ? parsed.ret : 0;
-    const errcode = typeof parsed.errcode === "number" ? parsed.errcode : undefined;
-    if (ret !== 0) {
-      throw new WeixinApiError(
-        `${shortEndpoint(endpoint)} failed: ret=${ret} errcode=${errcode ?? "undefined"} errmsg=${String(parsed.errmsg ?? "")}`,
-        shortEndpoint(endpoint),
-        ret,
-        errcode
-      );
+      const parsed = text ? JSON.parse(text) as Record<string, unknown> : {};
+      const ret = typeof parsed.ret === "number" ? parsed.ret : 0;
+      const errcode = typeof parsed.errcode === "number" ? parsed.errcode : undefined;
+      if (ret !== 0) {
+        throw new WeixinApiError(
+          `${shortEndpoint(endpoint)} failed: ret=${ret} errcode=${errcode ?? "undefined"} errmsg=${String(parsed.errmsg ?? "")}`,
+          shortEndpoint(endpoint),
+          ret,
+          errcode
+        );
+      }
+      return parsed;
+    } catch (error) {
+      if (timeout.didTimeout) {
+        throw new WeixinApiTimeoutError(endpoint, timeout.timeoutMs);
+      }
+      throw error;
+    } finally {
+      timeout.cleanup();
     }
-    return parsed;
   }
+}
+
+function createRequestSignal(inputSignal: AbortSignal | undefined, timeoutMs: number): {
+  signal?: AbortSignal;
+  readonly didTimeout: boolean;
+  timeoutMs: number;
+  cleanup: () => void;
+} {
+  if (!timeoutMs) {
+    return { signal: inputSignal, didTimeout: false, timeoutMs: 0, cleanup: () => undefined };
+  }
+  const controller = new AbortController();
+  let didTimeout = false;
+  const timer = setTimeout(() => {
+    didTimeout = true;
+    controller.abort();
+  }, timeoutMs);
+  let onAbort: (() => void) | undefined;
+  if (inputSignal) {
+    onAbort = () => controller.abort(inputSignal.reason);
+    if (inputSignal.aborted) onAbort();
+    else inputSignal.addEventListener("abort", onAbort, { once: true });
+  }
+  return {
+    signal: controller.signal,
+    get didTimeout() {
+      return didTimeout;
+    },
+    timeoutMs,
+    cleanup: () => {
+      clearTimeout(timer);
+      if (inputSignal && onAbort) inputSignal.removeEventListener("abort", onAbort);
+    }
+  };
 }
 
 function shortEndpoint(endpoint: string): string {

@@ -251,6 +251,24 @@ test("uses WeChat session model overrides when continuing the same session from 
   assert.equal(runs[0].effort, "high");
 });
 
+test("records the model reported by Codex for each Web usage record", async (t) => {
+  const { manager, root, setRunHandler, paths } = setup(t);
+  const session = manager.createSession("account-one", "alice@im.wechat", root, "Priced chat");
+  const store = new RuntimeStateStore(accountStatePaths(paths, "account-one"));
+  store.setModelOverride("alice@im.wechat", "configured-model");
+  setRunHandler(async () => ({
+    raw: "",
+    text: "done",
+    threadId: "thread-priced",
+    model: "runtime-model",
+    usage: { inputTokens: 10, outputTokens: 2, totalTokens: 12, cachedInputTokens: 1 }
+  }));
+
+  await manager.continueSession("account-one", session.id, "统计这轮");
+
+  assert.equal(manager.listSessions()[0].tokenUsageRecords?.[0]?.model, "runtime-model");
+});
+
 test("streams Web progress without exposing final-answer deltas", async (t) => {
   const { manager, root, setRunHandler } = setup(t);
   const session = manager.createSession("account-one", "alice@im.wechat", root, "Streaming chat");

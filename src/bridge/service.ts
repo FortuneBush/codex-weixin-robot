@@ -1,7 +1,7 @@
 import path from "node:path";
 
 import { AccessController } from "./access.js";
-import { parseActionBlocks } from "./actions.js";
+import { assertPathWithinAllowedRoots, parseActionBlocks } from "./actions.js";
 import { buildPrompt, buildPromptPreview, chunkText, parsePrompt } from "./format.js";
 import { PromptBuffer } from "./prompt-buffer.js";
 import type { CodexModelOption, CodexRuntimeInfo } from "../codex/app-server-runner.js";
@@ -22,6 +22,7 @@ export type BridgeServiceOptions = {
   inboundDir?: string;
   mediaFetch?: FetchLike;
   onTurnStatus?: (status: { senderId: string; sessionId: string; active: boolean }) => void;
+  acquireTurn?: (sessionId: string) => Promise<() => void>;
 };
 
 const PROGRESS_SEND_INTERVAL_MS = 4_000;
@@ -196,6 +197,7 @@ export class BridgeService {
   private readonly access: AccessController;
   private readonly buffers: PromptBuffer;
   private readonly runner: HybridCodexRunner;
+  private readonly stalePendingDeliverySenders = new Set<string>();
 
   constructor(private readonly options: BridgeServiceOptions) {
     this.access = new AccessController({
@@ -218,6 +220,9 @@ export class BridgeService {
     if (message.contextToken) {
       this.options.stateStore.rememberContextToken(message.senderId, message.contextToken);
     }
+    // A new inbound message carries the only reliable replacement for a stale
+    // WeChat context token, so allow queued replies to retry now.
+    this.stalePendingDeliverySenders.delete(message.senderId);
 
     const access = this.access.requireAccess(message.senderId);
     if (!access.allowed) {
@@ -246,6 +251,13 @@ export class BridgeService {
     }
 
     await this.runCodexTurn(message, "", items);
+  }
+
+  async retryPendingDeliveries(): Promise<void> {
+    const senders = new Set(this.options.stateStore.snapshot.pendingDeliveries.map((delivery) => delivery.senderId));
+    for (const senderId of senders) {
+      await this.flushPendingDeliveries(senderId);
+    }
   }
 
   private async handleCommand(message: NormalizedWeixinMessage, command: { name: string; arg: string }): Promise<void> {
@@ -520,10 +532,7 @@ export class BridgeService {
       }
     } catch (error) {
       if (error instanceof InboundMediaTooLargeError) throw error;
-      items.push({
-        kind: "text",
-        text: `[WeChat attachment download failed: ${error instanceof Error ? error.message : String(error)}]`
-      });
+      throw new Error(`WeChat attachment download failed: ${error instanceof Error ? error.message : String(error)}`);
     }
     return items;
   }
@@ -532,9 +541,12 @@ export class BridgeService {
     try {
       return await this.promptItemsFromMessage(message);
     } catch (error) {
-      if (!(error instanceof InboundMediaTooLargeError)) throw error;
-      const maxMiB = Math.floor(error.maxBytes / (1024 * 1024));
-      await this.reply(message.senderId, `附件超过 ${maxMiB} MiB 上限，请压缩或裁剪后重新发送。`);
+      if (error instanceof InboundMediaTooLargeError) {
+        const maxMiB = Math.floor(error.maxBytes / (1024 * 1024));
+        await this.reply(message.senderId, `附件超过 ${maxMiB} MiB 上限，请压缩或裁剪后重新发送。`);
+      } else {
+        await this.reply(message.senderId, `附件读取失败：${error instanceof Error ? error.message : String(error)}。请重新上传后再试。`);
+      }
       return undefined;
     }
   }
@@ -553,6 +565,9 @@ export class BridgeService {
       ? new ProgressNotifier(async (progress) => {
         return this.reply(message.senderId, `【进度】${progress}`, { durable: false });
       })
+      : undefined;
+    const releaseTurn = this.options.acquireTurn
+      ? await this.options.acquireTurn(session.id)
       : undefined;
     this.options.onTurnStatus?.({ senderId: message.senderId, sessionId: session.id, active: true });
     try {
@@ -578,7 +593,12 @@ export class BridgeService {
         if (result.threadId) {
           this.options.stateStore.setThread(message.senderId, result.threadId);
         }
-        this.options.stateStore.recordTokenUsage(session.id, result.usage, result.threadId);
+        this.options.stateStore.recordTokenUsage(
+          session.id,
+          result.usage,
+          result.threadId,
+          result.model ?? session.model ?? this.options.config.model
+        );
         const parsed = parseActionBlocks(result.text);
         const remaining = chunkText(parsed.visibleText);
         if (remaining.length) {
@@ -593,17 +613,23 @@ export class BridgeService {
     } finally {
       await progressNotifier?.close();
       this.options.onTurnStatus?.({ senderId: message.senderId, sessionId: session.id, active: false });
+      releaseTurn?.();
     }
   }
 
   private async sendLocalMedia(senderId: string, action: { type: "image" | "file" | "video"; path: string }): Promise<void> {
     try {
+      const workspace = this.options.stateStore.getWorkspace(senderId) ?? this.options.config.defaultCwd;
+      const inboundRoot = this.options.inboundDir ?? path.join(this.options.config.defaultCwd, ".codex-weixin-inbound");
+      const allowedRoots = [workspace, inboundRoot];
+      assertPathWithinAllowedRoots(action.path, allowedRoots);
       await sendLocalMediaFile({
         client: this.options.weixin,
         toUserId: senderId,
         contextToken: this.options.stateStore.getContextToken(senderId),
         filePath: action.path,
-        kind: action.type
+        kind: action.type,
+        allowedRoots
       });
     } catch (error) {
       await this.reply(senderId, `[codex-weixin] Failed to send ${action.type}: ${error instanceof Error ? error.message : String(error)}`);
@@ -681,10 +707,14 @@ export class BridgeService {
   }
 
   private async flushPendingDeliveries(senderId: string): Promise<void> {
+    if (this.stalePendingDeliverySenders.has(senderId)) return;
     for (const delivery of this.options.stateStore.listPendingDeliveries(senderId)) {
       try {
         const sent = await this.reply(senderId, delivery.text, { durable: false });
-        if (!sent) return;
+        if (!sent) {
+          this.stalePendingDeliverySenders.add(senderId);
+          return;
+        }
         this.options.stateStore.removePendingDelivery(delivery.id);
       } catch (error) {
         console.warn(`Pending WeChat delivery failed for ${senderId}: ${error instanceof Error ? error.message : String(error)}`);

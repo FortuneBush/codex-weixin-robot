@@ -47,6 +47,23 @@ test("classifies ret=-2 sendmessage failures as stale context", async () => {
   );
 });
 
+test("aborts stalled API requests at the configured timeout", async () => {
+  const client = new WeixinApiClient({
+    baseUrl: "https://ilink.example/",
+    token: "secret",
+    requestTimeoutMs: 5,
+    fetch: async (_url, init) => await new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+    })
+  });
+
+  await assert.rejects(client.sendText({ toUserId: "alice@im.wechat", text: "hello" }), (error) => {
+    assert.equal(error?.name, "WeixinApiTimeoutError");
+    assert.equal((error as { endpoint?: string }).endpoint, "sendmessage");
+    return true;
+  });
+});
+
 test("builds getupdates requests with iLink cursor field", async () => {
   const calls: Array<{ url: string; init: RequestInit }> = [];
   const client = new WeixinApiClient({
@@ -62,7 +79,8 @@ test("builds getupdates requests with iLink cursor field", async () => {
   await client.getUpdates("cursor-1", controller.signal);
 
   assert.equal(calls[0].url, "https://ilink.example/ilink/bot/getupdates");
-  assert.equal(calls[0].init.signal, controller.signal);
+  assert.ok(calls[0].init.signal);
+  assert.equal(calls[0].init.signal?.aborted, false);
   assert.deepEqual(JSON.parse(String(calls[0].init.body)), {
     get_updates_buf: "cursor-1",
     base_info: { channel_version: "0.1.0" }

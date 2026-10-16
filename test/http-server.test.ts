@@ -20,6 +20,123 @@ test("Codex status probe reuses the runner command resolver", async () => {
   });
 });
 
+test("usage API filters, aggregates and paginates on the server", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-usage-api-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  saveConfig(resolveStatePaths(root), {
+    ...defaultConfig(root),
+    model: "gpt-test",
+    modelPricing: {
+      "gpt-test": { inputPerMillionUsd: 1, outputPerMillionUsd: 2, cachedInputPerMillionUsd: 0.2 }
+    }
+  });
+  const sessions = [
+    {
+      accountId: "account-one",
+      id: "session-a",
+      title: "Alpha",
+      workspace: root,
+      tokenUsage: {
+        inputTokens: 300,
+        outputTokens: 100,
+        totalTokens: 400,
+        cachedInputTokens: 100,
+        turnCount: 2,
+        lastUsedAt: "2026-01-02T10:00:00.000Z"
+      },
+      tokenUsageRecords: [
+        { at: "2026-01-01T10:00:00.000Z", model: "gpt-test", inputTokens: 100, outputTokens: 40, totalTokens: 140, cachedInputTokens: 20 },
+        { at: "2026-01-02T10:00:00.000Z", model: "gpt-test", inputTokens: 200, outputTokens: 60, totalTokens: 260, cachedInputTokens: 80 }
+      ]
+    },
+    {
+      accountId: "account-two",
+      id: "session-b",
+      title: "Beta",
+      workspace: root,
+      tokenUsage: {
+        inputTokens: 500,
+        outputTokens: 50,
+        totalTokens: 550,
+        cachedInputTokens: 250,
+        turnCount: 1,
+        lastUsedAt: "2026-01-03T10:00:00.000Z"
+      },
+      tokenUsageRecords: [
+        { at: "2026-01-03T10:00:00.000Z", model: "gpt-test", inputTokens: 500, outputTokens: 50, totalTokens: 550, cachedInputTokens: 250 }
+      ]
+    }
+  ];
+  const server = await startLocalHttpServer({
+    paths: resolveStatePaths(root),
+    accountManager: { listSessions: () => sessions } as never,
+    port: 0
+  });
+  t.after(() => server.close());
+
+  const sessionSummaryResponse = await fetch(`${server.url}/api/sessions`);
+  const sessionSummary = await sessionSummaryResponse.json() as { sessions: Array<Record<string, unknown>> };
+  assert.equal("tokenUsageRecords" in sessionSummary.sessions[0], false);
+
+  const firstPageResponse = await fetch(`${server.url}/api/usage?sort=input&pageSize=1&sessionPage=1&recentPageSize=1`);
+  assert.equal(firstPageResponse.status, 200);
+  const firstPage = await firstPageResponse.json() as {
+    totals: { inputTokens: number; outputTokens: number; totalTokens: number; cachedInputTokens: number; turnCount: number; cacheHitRate: number; estimatedCostUsd?: number };
+    timeline: Array<{ date: string; totalTokens: number }>;
+    sessions: Array<{ sessionId: string; usage: { inputTokens: number } }>;
+    recent: Array<{ sessionId: string; inputTokens: number }>;
+    pagination: { sessions: { page: number; pageSize: number; total: number; pageCount: number }; recent: { page: number; total: number; pageCount: number } };
+  };
+  assert.deepEqual(firstPage.totals, {
+    inputTokens: 800,
+    outputTokens: 150,
+    totalTokens: 950,
+    cachedInputTokens: 350,
+    turnCount: 3,
+    cacheHitRate: 0.4375,
+    estimatedCostUsd: 0.00082
+  });
+  assert.deepEqual(firstPage.sessions.map((session) => [session.sessionId, session.usage.inputTokens]), [["session-b", 500]]);
+  assert.deepEqual(firstPage.recent.map((record) => [record.sessionId, record.inputTokens]), [["session-b", 500]]);
+  assert.deepEqual(firstPage.pagination, {
+    sessions: { page: 1, pageSize: 1, total: 2, pageCount: 2 },
+    recent: { page: 1, pageSize: 1, total: 3, pageCount: 3 }
+  });
+  assert.deepEqual(firstPage.timeline.map((point) => [point.date, point.totalTokens]), [
+    ["2026-01-01", 140],
+    ["2026-01-02", 260],
+    ["2026-01-03", 550]
+  ]);
+
+  const filteredResponse = await fetch(
+    `${server.url}/api/usage?accountId=account-one&from=2026-01-02&to=2026-01-02&pageSize=20`
+  );
+  assert.equal(filteredResponse.status, 200);
+  const filtered = await filteredResponse.json() as {
+    totals: { inputTokens: number; outputTokens: number; totalTokens: number; cachedInputTokens: number; turnCount: number; estimatedCostUsd?: number };
+    sessions: Array<{ sessionId: string; usage: { totalTokens: number; turnCount: number } }>;
+    recent: Array<{ sessionId: string }>;
+  };
+  assert.deepEqual(filtered.totals, {
+    inputTokens: 200,
+    outputTokens: 60,
+    totalTokens: 260,
+    cachedInputTokens: 80,
+    turnCount: 1,
+    estimatedCostUsd: 0.000256,
+    cacheHitRate: 0.4
+  });
+  assert.equal(filtered.sessions.length, 1);
+  assert.equal(filtered.sessions[0].sessionId, "session-a");
+  assert.equal(filtered.sessions[0].usage.totalTokens, 260);
+  assert.equal(filtered.sessions[0].usage.turnCount, 1);
+  assert.deepEqual(filtered.recent.map((record) => record.sessionId), ["session-a"]);
+
+  const invalid = await fetch(`${server.url}/api/usage?pageSize=0`);
+  assert.equal(invalid.status, 400);
+  assert.match((await invalid.json() as { error: string }).error, /Invalid usage pageSize/);
+});
+
 test("account deletion passes the session-history retention choice", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-delete-api-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

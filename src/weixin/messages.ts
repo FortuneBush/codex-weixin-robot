@@ -15,6 +15,8 @@ export type WeixinInboundAttachment = {
 
 export type NormalizedWeixinMessage = {
   id: string;
+  /** Message ids represented by this prompt after attachment pairing. */
+  sourceIds?: string[];
   senderId: string;
   contextToken?: string;
   text: string;
@@ -38,8 +40,10 @@ export function normalizeWeixinMessage(raw: WeixinRawMessage): NormalizedWeixinM
     }
   }
   const attachments = extractAttachments(raw.item_list ?? []);
+  const id = String(raw.message_id ?? `${senderId}:${Date.now()}`);
   return {
-    id: String(raw.message_id ?? `${senderId}:${Date.now()}`),
+    id,
+    sourceIds: [id],
     senderId,
     contextToken: raw.context_token,
     text: textParts.join("\n").trim(),

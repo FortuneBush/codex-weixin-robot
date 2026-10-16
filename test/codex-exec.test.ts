@@ -181,6 +181,15 @@ test("extracts nested agent_message text and thread id from codex json output", 
   });
 });
 
+test("extracts a model reported by codex exec JSON events", () => {
+  const raw = [
+    JSON.stringify({ type: "thread.started", thread_id: "thread-model", model: "gpt-5.6-sol" }),
+    JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1 } })
+  ].join("\n");
+
+  assert.equal(parseCodexExecOutput(raw).model, "gpt-5.6-sol");
+});
+
 test("stops the active codex exec fallback process", async (t) => {
   const runner = new CodexExecRunner({
     codexBin: path.join(fixturesDir, "fake-codex-exec-hold.mjs"),

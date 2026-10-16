@@ -4,6 +4,7 @@ export * from "./bridge/format.js";
 export * from "./bridge/prompt-buffer.js";
 export * from "./bridge/service.js";
 export * from "./codex/exec-runner.js";
+export * from "./codex/pricing.js";
 export * from "./codex/runner.js";
 export * from "./state/config.js";
 export * from "./state/paths.js";

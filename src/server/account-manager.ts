@@ -24,7 +24,7 @@ import {
   type PublicWeixinAccount,
   type WeixinAccount
 } from "../weixin/accounts.js";
-import { isStaleContextError, WeixinApiClient } from "../weixin/api.js";
+import { WeixinApiClient } from "../weixin/api.js";
 import { monitorWeixin, type MonitorOptions } from "../weixin/monitor.js";
 import { inferMediaKind, sanitizeFileName } from "../weixin/media.js";
 
@@ -33,6 +33,8 @@ export type AccountRunStatus = "stopped" | "starting" | "running" | "error";
 export type AccountSummary = PublicWeixinAccount & {
   status: AccountRunStatus;
   error?: string;
+  lastPollError?: string;
+  lastPollAt?: string;
   pairedSenderIds: string[];
   lastActiveSenderId?: string;
   sessionCount: number;
@@ -81,6 +83,9 @@ type RuntimeEntry = {
   service?: BridgeService;
   store?: RuntimeStateStore;
   error?: string;
+  lastPollError?: string;
+  lastPollAt?: string;
+  retryTimer?: NodeJS.Timeout;
 };
 
 export type AccountManagerOptions = {
@@ -95,6 +100,7 @@ export type AccountManagerOptions = {
 export class AccountManager {
   private readonly entries = new Map<string, RuntimeEntry>();
   private readonly respondingSessions = new Map<string, number>();
+  private readonly sessionChains = new Map<string, Promise<unknown>>();
   private readonly configProvider: () => CodexWeixinConfig;
   private readonly clientFactory: (account: WeixinAccount) => WeixinApiClient;
   private readonly bridgeFactory: (input: ConstructorParameters<typeof BridgeService>[0]) => BridgeService;
@@ -168,7 +174,8 @@ export class AccountManager {
       inboundDir: statePaths.inboundDir,
       runner: this.runnerFor(config),
       listCodexModels: () => this.getCodexModels(),
-      onTurnStatus: ({ sessionId, active }) => this.setSessionResponding(account.accountId, sessionId, active)
+      onTurnStatus: ({ sessionId, active }) => this.setSessionResponding(account.accountId, sessionId, active),
+      acquireTurn: (sessionId) => this.acquireSessionTurn(account.accountId, sessionId)
     });
     const entry: RuntimeEntry = { status: "starting", controller, service, store };
     this.entries.set(account.accountId, entry);
@@ -179,7 +186,8 @@ export class AccountManager {
       signal: controller.signal,
       initialSyncKey: store.getSyncKey(),
       onSyncKey: (syncKey) => store.setSyncKey(syncKey),
-      claimMessage: (message) => store.claimProcessedMessage(message.id),
+      claimMessage: (message) => !store.hasProcessedMessage(message.id),
+      completeMessage: (message) => store.markProcessedMessage(message.id),
       onMessage: (message) => service.handleMessage(message),
       onMessageError: async (error, message) => {
         const text = userFacingMessageHandlingError(error);
@@ -190,16 +198,23 @@ export class AccountManager {
             contextToken: store.getContextToken(message.senderId)
           });
         } catch (sendError) {
-          if (isStaleContextError(sendError)) {
-            store.enqueuePendingDelivery(message.senderId, text);
-            return;
-          }
-          throw sendError;
+          store.enqueuePendingDelivery(message.senderId, text);
+          console.warn(`Unable to deliver WeChat error notification for ${message.senderId}: ${sendError instanceof Error ? sendError.message : String(sendError)}`);
         }
+      },
+      onPollError: (error) => {
+        entry.lastPollAt = new Date().toISOString();
+        entry.lastPollError = error instanceof Error ? error.message : String(error);
+      },
+      onPollSuccess: () => {
+        entry.lastPollAt = new Date().toISOString();
+        entry.lastPollError = undefined;
       }
     }).then(() => {
+      if (entry.retryTimer) clearInterval(entry.retryTimer);
       entry.status = "stopped";
     }).catch((error: unknown) => {
+      if (entry.retryTimer) clearInterval(entry.retryTimer);
       if (controller.signal.aborted) {
         entry.status = "stopped";
         return;
@@ -207,6 +222,12 @@ export class AccountManager {
       entry.status = "error";
       entry.error = error instanceof Error ? error.message : String(error);
     });
+    entry.retryTimer = setInterval(() => {
+      void service.retryPendingDeliveries().catch((error) => {
+        console.warn(`Pending WeChat delivery retry failed for ${account.accountId}: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }, 60_000);
+    entry.retryTimer.unref?.();
     return this.summary(account);
   }
 
@@ -215,6 +236,12 @@ export class AccountManager {
     const entry = this.entries.get(account.accountId);
     if (entry) {
       entry.controller?.abort();
+      try {
+        await this.runnerFor().stop();
+      } catch (error) {
+        console.warn(`Unable to stop Codex turns for ${account.accountId}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      if (entry.retryTimer) clearInterval(entry.retryTimer);
       await entry.task;
       entry.status = "stopped";
     }
@@ -403,6 +430,31 @@ export class AccountManager {
     if (!prompt && !uploads.length) {
       throw new Error("Message text or attachment is required");
     }
+    requireSession(this.storeFor(accountId), sessionId);
+    // Reflect queued work immediately in the UI, even while a previous turn
+    // owns the session lock.
+    this.setSessionResponding(accountId, sessionId, true);
+    const lock = this.acquireSessionTurnMaybe(accountId, sessionId);
+    const release = typeof lock === "function" ? lock : await lock;
+    try {
+      return await this.continueSessionNow(accountId, sessionId, text, uploads, onProgress);
+    } finally {
+      release();
+      this.setSessionResponding(accountId, sessionId, false);
+    }
+  }
+
+  private async continueSessionNow(
+    accountId: string,
+    sessionId: string,
+    text: string,
+    uploads: SessionUpload[] = [],
+    onProgress?: (message: string) => Promise<void> | void
+  ): Promise<SessionChatResult> {
+    const prompt = text.trim();
+    if (!prompt && !uploads.length) {
+      throw new Error("Message text or attachment is required");
+    }
     const store = this.storeFor(accountId);
     const session = requireSession(store, sessionId);
     const config = this.configProvider();
@@ -411,7 +463,6 @@ export class AccountManager {
     if (promptPreview) {
       store.setSessionPromptPreview(session.id, promptPreview);
     }
-    this.setSessionResponding(accountId, session.id, true);
     try {
       const result = await this.runnerFor(config).run({
         prompt: buildPrompt(prompt, attachments, "Web"),
@@ -428,7 +479,7 @@ export class AccountManager {
         throw new Error("Codex did not return a thread id");
       }
       store.setSessionThread(session.id, threadId);
-      store.recordTokenUsage(session.id, result.usage, threadId);
+      store.recordTokenUsage(session.id, result.usage, threadId, result.model ?? session.model ?? config.model);
       const parsed = parseAssistantMessage(result.text);
       return {
         threadId,
@@ -444,7 +495,8 @@ export class AccountManager {
         }
       };
     } finally {
-      this.setSessionResponding(accountId, session.id, false);
+      // The outer continueSession wrapper owns the responding counter so that
+      // queued requests are visible before they acquire the session lock.
     }
   }
 
@@ -531,6 +583,31 @@ export class AccountManager {
     }
   }
 
+  private acquireSessionTurn(accountId: string, sessionId: string): Promise<() => void> {
+    return Promise.resolve(this.acquireSessionTurnMaybe(accountId, sessionId));
+  }
+
+  private acquireSessionTurnMaybe(accountId: string, sessionId: string): (() => void) | Promise<() => void> {
+    const key = sessionRuntimeKey(accountId, sessionId);
+    const previous = this.sessionChains.get(key);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const current = previous ? previous.catch(() => {}).then(() => gate) : gate;
+    this.sessionChains.set(key, current);
+    const makeRelease = (): (() => void) => {
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        release();
+        if (this.sessionChains.get(key) === current) this.sessionChains.delete(key);
+      };
+    };
+    return previous ? previous.catch(() => {}).then(() => makeRelease()) : makeRelease();
+  }
+
   private runnerFor(config = this.configProvider()): HybridCodexRunner {
     this.runner ??= this.runnerFactory(config);
     return this.runner;
@@ -551,6 +628,8 @@ export class AccountManager {
       ...publicAccount(account),
       status: entry?.status ?? "stopped",
       ...(entry?.error ? { error: entry.error } : {}),
+      ...(entry?.lastPollError ? { lastPollError: entry.lastPollError } : {}),
+      ...(entry?.lastPollAt ? { lastPollAt: entry.lastPollAt } : {}),
       pairedSenderIds: store.listPairedSenderIds(),
       lastActiveSenderId: store.getLastActiveSenderId(),
       sessionCount: store.listSessions().length
